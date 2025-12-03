@@ -70,7 +70,8 @@ def run_tournament(
     im = plt.imshow(results_matrix, cmap=cmap, vmin=-2.0, vmax=2.0, interpolation='nearest')
 
     plt.colorbar(im, label="Chips per hand (row vs column)", shrink=0.8)
-    plt.title(f"Poker32 Round-Robin Tournament\n{n_hands:,} hands per match | Total hands: {n_hands * total_matches * 2:,}")
+    plt.title(f"Poker32 Round-Robin Tournament\n{n_hands:,} hands per match | "
+              f"Total hands: {n_hands * total_matches * 2:,}")
     plt.xticks(np.arange(n), names, rotation=45, ha="right")
     plt.yticks(np.arange(n), names)
 
@@ -113,5 +114,5 @@ if __name__ == "__main__":
         models_dir="..\\models",
         n_hands=10_000,
         seed=42,
-        save_plot="tournament_heatmap.png"
+        save_plot="..\\data\\tournament_heatmap.png"
     )
