@@ -205,8 +205,17 @@ class Poker32:
                 "rewards": self.get_rewards()}
 
     def get_legal_moves(self) -> Tuple:
-        branches = GAME_TREE[self._get_game_branch()]
-        return tuple(sorted(s[-1] for s in branches))
+        """
+        Get a tuple of all the legal moves in that state.
+        Returns empty tuple if game is over.
+        """
+        key = self._get_game_branch()
+        if key in GAME_TREE:
+            branches = GAME_TREE[key]
+            return tuple(sorted(s[-1] for s in branches))
+        else:
+            # For when checking for legal moves after game is over
+            return tuple()
 
     def make_move(self, move: str):
         assert move in self.get_legal_moves()
@@ -221,7 +230,7 @@ class Poker32:
     # Add this improved version to poker32.py (or keep separate)
     def play(
         self,
-        players: Tuple,
+        players: List | Tuple,
         *,
         verbose: bool = False
     ):
@@ -248,7 +257,17 @@ class Poker32:
             # Basic safety – fall back to a legal move if the agent is stupid
             if action not in legal_moves:
                 action = next(iter(legal_moves))          # pick any legal move
+
+            # Update game state
             self.make_move(action)
+
+            # Notify all agents about the move
+            for i, player in enumerate(players):
+                player.broadcast_move(
+                    move=action,
+                    new_state=self.get_subjective_state(i),     # each agent gets its own view
+                    actor_id=player_to_act  # the player that made the move
+                )
 
             if verbose:
                 print(action)
