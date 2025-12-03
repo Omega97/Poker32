@@ -63,6 +63,25 @@ class AgentRL(Agent):
         return state["hole"], state["branch"]
 
     def _get_policy(self, infoset: InfosetKey, legal_moves: tuple[str, ...]) -> Dict[str, float]:
+        """
+        Compute action probabilities via softmax over logits for a given infoset.
+
+        If temperature is zero, returns a greedy (deterministic) policy.
+        Otherwise, applies softmax with temperature scaling and log-sum-exp
+        for numerical stability. Unseen actions default to logit = 0.
+
+        Parameters
+        ----------
+        infoset : tuple[str, str]
+            The (hole_card, betting_branch) defining the subjective state.
+        legal_moves : tuple[str, ...]
+            Actions allowed by the game rules in this state.
+
+        Returns
+        -------
+        dict[str, float]
+            Probability distribution over legal actions (sums to 1).
+        """
         temp = self.config.get("temperature", 1.)
         logits = self.logits.get(infoset, {})
         action_logits = [logits.get(a, 0.0) for a in legal_moves]
@@ -103,7 +122,27 @@ class AgentRL(Agent):
     # Learning
     # ------------------------------------------------------------------ #
     def observe_terminal(self, state: dict):
+        """
+        Learn from the outcome of a completed hand by accumulating policy updates.
 
+        For each action the agent took during the hand (stored in `self.history`),
+        this method accumulates an update proportional to the player's reward:
+            Δlogit = learning_rate * reward
+
+        Updates are **not applied immediately**; they are stored in `self.accumulated`
+        and applied only after every `n_epochs` games (at cycle boundaries) to reduce
+        variance and improve convergence in self-play.
+
+        This method is a no-op if `self.training` is False.
+
+        Parameters
+        ----------
+        state : dict
+            Terminal state containing:
+              - 'rewards': tuple of (p0_reward, p1_reward)
+              - 'position': this agent's player index
+              - other metadata (unused here)
+        """
         # Terminate if training mode is not ON
         if not self.training:
             return
@@ -146,7 +185,25 @@ class AgentRL(Agent):
             grad_vec: list[float],
             n_actions: int
     ) -> list[float]:
-        """Return gradient scaled so that ||update||₂ = lr * sqrt(n_actions)."""
+        """
+        Normalize and scale a raw policy gradient vector to have controlled magnitude.
+
+        The update vector is scaled so that its L2 norm equals `learning_rate * sqrt(n_actions)`.
+        This stabilizes learning across infosets with different numbers of legal actions
+        by preventing overly large updates in high-branching states.
+
+        Parameters
+        ----------
+        grad_vec : list[float]
+            Raw accumulated update values (one per action) at a given infoset.
+        n_actions : int
+            Number of legal actions at this infoset.
+
+        Returns
+        -------
+        list[float]
+            Scaled and normalized update vector with controlled magnitude.
+        """
         import math
         lr = self.config["learning_rate"]
         norm = math.hypot(*grad_vec)
@@ -162,7 +219,31 @@ class AgentRL(Agent):
             normalized_grad: list[float],
             initial_logit_range=0.1,
     ):
-        """Apply momentum, update logits, then max-normalize and clip to [-20, 0] range."""
+        """
+        Apply momentum-filtered updates to policy logits and enforce numerical stability.
+
+        This method:
+          - Integrates the normalized gradient into a velocity buffer using momentum,
+          - Updates logits using the new velocity,
+          - Initializes missing logits with small random values if needed,
+          - Normalizes logits so the maximum is 0 (equivalent to softmax invariance),
+          - Clips logits from below to avoid vanishing gradients (`min_logit` config).
+
+        Parameters
+        ----------
+        infoset : tuple[str, str]
+            The (hole_card, betting_branch) identifying the decision point.
+        actions : list[str]
+            Ordered list of actions corresponding to `normalized_grad`.
+        normalized_grad : list[float]
+            Gradient vector after L2 normalization and scaling.
+        initial_logit_range : float, optional
+            Range for uniform initialization of unseen action logits.
+
+        Side Effects
+        ------------
+        Modifies `self.logits[infoset]` and `self.update_momentum[infoset]` in place.
+        """
         gamma = self.config.get("momentum", 0.9)
         min_logit = -abs(self.config.get("min_logit", -20))
         logits = self.logits.setdefault(infoset, {})
@@ -196,10 +277,23 @@ class AgentRL(Agent):
 
     def _apply_accumulated_updates(self, initial_logit_range=0.1):
         """
-        1. Build raw gradient
-        2. Normalize + scale
-        3. Apply momentum and update logits
-        4. Clean up if nothing left
+        Apply delayed policy updates after each training cycle to improve stability.
+
+        This method processes the accumulated gradient-like updates collected during
+        `n_epochs` self-play games and applies them to the policy logits using:
+          1. L2 normalization and scaling of the raw updates,
+          2. Momentum-based velocity integration,
+          3. Max-normalization of logits (so the best action has logit = 0),
+          4. Lower clipping to prevent logits from vanishing numerically.
+
+        Infers the full action support at each infoset by merging keys from logits,
+        accumulated updates, and momentum buffers. Empty infosets are cleaned up.
+
+        Parameters
+        ----------
+        initial_logit_range : float, optional
+            Range for initializing logits of previously unseen actions (default: 0.1).
+            Used only if an action appears in updates but not in current logits.
         """
         for infoset in list(self.accumulated.keys()):
             raw_updates = self.accumulated[infoset]
