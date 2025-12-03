@@ -14,6 +14,16 @@ init()
 InfosetKey = tuple[str, str]
 
 
+ACTIONS = {
+    'f': "🚫 fold",
+    'c': "🤝 call/check",
+    'R': "📈 raise",
+    'D': "‼️ double raise",
+    'T': "🚀 triple raise",
+    'Q': "💥 all-in"
+}
+
+
 class Agent:
     """
     Base class for all Poker32 agents.
@@ -57,8 +67,7 @@ class Agent:
         Useful for: logging, UI updates, debugging, or future multi-agent learning.
         """
         if self.verbose:
-            actor = "You" if actor_id == 0 else "Opponent"
-            print(f"  → {actor} played: {move}  |  branch → {new_state['branch'] or 'root'}")
+            print(f'> {actor_id} played "{ACTIONS[move]}"  |  branch → {new_state["branch"] or "root"}')
 
 
 class RandomAgent(Agent):
@@ -81,57 +90,66 @@ class HumanAgent(Agent):
     def __init__(self, name: str = "Human", verbose: bool = True):
         super().__init__(rng=None, verbose=verbose)
         self.name = name
+        # ---------- NEW: track performance ----------
+        self.cumulative_chips = 0
+        self.hands_played = 0
+        # -------------------------------------------
 
     def observe_root(self, state: dict):
         if self.verbose:
-            print("\n" + "="*60)
-            print(f"     NEW HAND — You are {self.name}")
-            print("="*60)
+            print("\n" + "=" * 60)
+            print(f"> NEW HAND")
+            print(f"> You are {self.name}")
+            if state.get("position") == 0:
+                print("🔹 You are the Small Blind (act first)")
+            else:
+                print("🟦 You are the Big Blind (act second)")
+            print()
+            print(' ----- ACTION BEGINS -----')
 
     def choose_action(self, state: dict) -> str:
         hole = state["hole"]
         branch = state["branch"] or "root"
-        legal_moves = "".join(state["legal_moves"])
-        player_id = state.get("player_id", 0)
+        legal_moves = state["legal_moves"]   # e.g. ('f','c','R','D', …)
 
-        print()
-        print(f"> Your hole card: {hole}")
-        print(f'Current betting sequence: "{branch}"')
-        # print(f"Pot size: ~{pot} chips")
-        # print(f"Legal actions: {', '.join(legal_moves)}")
-
-        # Show action meaning
-        meaning = {
-            'f': "fold",
-            'c': "call/check",
-            'R': "raise (to 4)",
-            'D': "double raise (to 8)",
-            'T': "triple raise (to 16)",
-            'Q': "quadruple all-in (to 32)"
-        }
-        # print("Actions: " + "  ".join(f"{a}={meaning.get(a,a)}" for a in legal_moves))
+        print(f"🀄️  Your hole card: {hole}")
+        print(f'> Current betting sequence: "{branch}"')
 
         while True:
-            choice = input(f"\nYour move [{'/'.join(legal_moves)}]: ").strip().lower()
-            if choice in legal_moves.lower():
-                print(f"You chose: {choice} ({meaning.get(choice, choice)})")
-                return choice
-            else:
-                print(f"'{choice}' is an invalid move! Legal: {legal_moves}")
+            choice = input(f"Your move [{'/'.join(legal_moves)}]: ").strip().lower()
+            # compare case-insensitively, but send the **real** move back
+            for mv in legal_moves:
+                if choice == mv.lower():
+                    return mv          # <-- upper-case
+            print(f"'{choice}' is an invalid move! Legal: {''.join(legal_moves)}")
 
+    # ------------------------------------------------------------------
+    # NEW: updated terminal observer with cumulative stats
+    # ------------------------------------------------------------------
     def observe_terminal(self, state: dict):
         rewards = state["rewards"]
-        my_reward = rewards[0]  # we are always player 0 when playing
-        opp_card = state.get("opp_card")  # optional, if you expose it
+        player_id = state["position"]
+        my_reward = rewards[player_id]
+        opp_card = state.get("opp_card")
 
-        print("\n" + "="*60)
-        print("HAND OVER")
+        # ---- update trackers ----
+        self.cumulative_chips += my_reward
+        self.hands_played += 1
+        # -------------------------
+
+        print("\n ----- HAND OVER -----")
         if my_reward > 0:
-            print(f"You WON +{my_reward} chips!")
+            print(f"🏆  You WON +{my_reward} 🟡")
         elif my_reward < 0:
-            print(f"You lost {my_reward} chips")
+            print(f"💸  You lost {abs(my_reward)} 🟡")
         else:
-            print("Split pot")
+            print("⚖️  Split pot")
+
         if opp_card:
-            print(f"Opponent had: [{opp_card}]")
-        print("="*60 + "\n")
+            print(f"🃏  Opponent had {opp_card}")
+
+        # ---- show running stats ----
+        avg = self.cumulative_chips / self.hands_played
+        print(f"📊  Cumulative: {self.cumulative_chips:+} 🟡  "
+              f"Average: {avg:+.2f} 🟡 / hand")
+        print("=" * 60 + "\n")
