@@ -1,26 +1,31 @@
 import random
-import pickle
 import math
+import json
 from pathlib import Path
 from typing import Dict, Any
 from src.agent import Agent, InfosetKey
+from src.utils import round_floats
+
+
+def _serialize_infoset_key(key: InfosetKey) -> str:
+    """Convert (hole, branch) → 'hole|branch'"""
+    return f"{key[0]}|{key[1]}"
+
+
+def _deserialize_infoset_key(s: str) -> InfosetKey:
+    """Convert 'hole|branch' → (hole, branch)"""
+    parts = s.split('|', 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid serialized infoset key: {s}")
+    return (parts[0], parts[1])
 
 
 class AgentRL(Agent):
-    """
-    Tabular self-play RL agent using additive logit updates.
-
-    Policy: softmax over per-infoset logits.
-    Training: after each hand, add ε × reward to the logit of every action taken.
-    Updates are accumulated during a cycle (n_epochs games) and applied only at the end.
-    This delayed update improves stability in alternating self-play.
-    """
-
     DEFAULT_CONFIG = {
-        "learning_rate": 0.1,      # ε in the update: logit += ε * reward
-        "temperature": 0.5,        # softmax temperature for action selection
-        "n_epochs": 100,        # games per cycle
-        "n_cycles": 100,           # total training = n_epochs × n_cycles games
+        "learning_rate": 0.1,
+        "temperature": 1.0,
+        "n_epochs": 5_000,
+        "n_cycles": 50,
     }
 
     def __init__(
@@ -28,32 +33,29 @@ class AgentRL(Agent):
         rng: random.Random | None = None,
         config: Dict[str, Any] | None = None,
         policy_path: str | Path | None = None,
+        name: str | None = None,
         training: bool = False,
         verbose: bool = False,
     ):
         super().__init__(rng=rng, verbose=verbose)
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
 
-        # Logits: infoset → {action: logit}
         self.logits: Dict[InfosetKey, Dict[str, float]] = {}
-
-        # Accumulated updates during current cycle (reset every n_epochs)
         self.accumulated: Dict[InfosetKey, Dict[str, float]] = {}
-
         self.games_played = 0
         self.cycle_games = 0
+        self.name = name
+        self.training = training
+        self.action_counts: Dict[InfosetKey, Dict[str, int]] = {}
+        self.history: list[tuple[InfosetKey, str, int]] = []
 
         if policy_path:
             self.load(policy_path)
 
-        self.training = training
-
-        # History of infosets visited this hand (for updates at terminal)
-        self.history: list[tuple[InfosetKey, str]] = []  # (infoset, action_taken)
-
     # ------------------------------------------------------------------ #
     # Action selection
     # ------------------------------------------------------------------ #
+
     @staticmethod
     def _get_infoset_key(state: dict) -> InfosetKey:
         """
@@ -99,9 +101,13 @@ class AgentRL(Agent):
         total = sum(exps)
         return {a: exp / total for a, exp in zip(legal_moves, exps)}
 
+    def _append_to_history(self, infoset: InfosetKey, action: str, player_id: int):
+        self.history.append((infoset, action, player_id))
+
     def choose_action(self, state: dict) -> str:
         infoset = self._get_infoset_key(state)
         legal = state["legal_moves"]
+        player_id = state["player_id"]
 
         policy = self._get_policy(infoset, legal)
 
@@ -111,16 +117,52 @@ class AgentRL(Agent):
         action = self.rng.choices(actions, weights=probs, k=1)[0]
 
         # Record for later update
-        self.history.append((infoset, action))
+        self._append_to_history(infoset, action, player_id)
 
         if self.verbose:
-            print(f"Infoset {infoset} | Policy: { {a: f'{p:.3f}' for a,p in policy.items()} } → {action}")
+            print(f"Infoset {infoset} | Policy: { {a: f'{p:.3f}' for a, p in policy.items()} } → {action}")
 
         return action
 
     # ------------------------------------------------------------------ #
     # Learning
     # ------------------------------------------------------------------ #
+    def _accumulate_reward_from_history(self, state):
+        """Apply rewards from 'history' to 'accumulated'."""
+        lr = self.config["learning_rate"]
+        for i, (infoset, action, player_id) in enumerate(self.history):
+            # Accumulate update: only the taken action gets updated
+            if infoset not in self.accumulated:
+                self.accumulated[infoset] = {}
+
+            position = state["positions"][player_id]
+            reward = state["rewards"][position]
+            r0 = self.accumulated[infoset].get(action, 0.0)
+            self.accumulated[infoset][action] = r0 + lr * reward
+
+            # >>> DEBUG reward <<<
+            # hand, branch = infoset
+            # if len(state["branch"]) > 1 and state["branch"][-1:] == 'c':
+            #     if hand == '2':
+            #         if reward > 0:
+            #             print()
+            #             print(infoset)
+            #             for k, v in state.items():
+            #                 print(f"{k}: {v}")
+            #             raise ValueError('Reward!')
+            #     if hand == 'A':
+            #         if reward < 0:
+            #             print()
+            #             print(infoset)
+            #             for k, v in state.items():
+            #                 print(f"{k}: {v}")
+            #             raise ValueError('Reward!')
+
+            if infoset not in self.action_counts:
+                self.action_counts[infoset] = {}
+            c0 = self.action_counts[infoset].get(action, 0)
+            self.action_counts[infoset][action] = c0 + 1
+
     def observe_terminal(self, state: dict):
         """
         Learn from the outcome of a completed hand by accumulating policy updates.
@@ -143,23 +185,31 @@ class AgentRL(Agent):
               - 'position': this agent's player index
               - other metadata (unused here)
         """
+
+        # >>> Debug <<<
+        # player_id = state["player_id"]
+        # position: str = state["position"]
+        # reward = state["rewards"][position]
+        # branch = state["branch"]
+        # hole_card = state["hole_cards"][player_id]
+        # if branch[-1] == 'c':
+        #     if hole_card == '2':
+        #         if reward > 0:
+        #             print(state)
+        #             raise ValueError('Check your reward!')
+        #     if hole_card == 'A':
+        #         if reward < 0:
+        #             print(state)
+        #             raise ValueError('Check your reward!')
+
         # Terminate if training mode is not ON
         if not self.training:
             return
 
-        rewards = state["rewards"]  # tuple: reward for each player
         if not self.history:
             return
 
-        lr = self.config["learning_rate"]
-        for i, (infoset, action) in enumerate(self.history):
-            # Accumulate update: only the taken action gets updated
-            if infoset not in self.accumulated:
-                self.accumulated[infoset] = {}
-
-            player_id = i % 2
-            reward = rewards[player_id]
-            self.accumulated[infoset][action] = self.accumulated[infoset].get(action, 0.0) + lr * reward
+        self._accumulate_reward_from_history(state)
 
         self.history.clear()
 
@@ -180,238 +230,223 @@ class AgentRL(Agent):
                 set(self.update_momentum.get(infoset, {}).keys())
         )
 
-    def _l2_normalize_and_scale(
-            self,
-            grad_vec: list[float],
-            n_actions: int
-    ) -> list[float]:
-        """
-        Normalize and scale a raw policy gradient vector to have controlled magnitude.
+    def _compute_average_rewards(self, infoset: InfosetKey) -> Dict[str, float]:
+        """Return {action: average_reward} for actions seen this cycle."""
+        avg = {}
+        total_samples = 0
+        counts = self.action_counts.get(infoset, {})
+        rewards = self.accumulated.get(infoset, {})
 
-        The update vector is scaled so that its L2 norm equals `learning_rate * sqrt(n_actions)`.
-        This stabilizes learning across infosets with different numbers of legal actions
-        by preventing overly large updates in high-branching states.
+        for action in rewards:
+            count = counts.get(action, 0)
+            if count > 0:
+                avg[action] = rewards[action] / count
+                total_samples += count
 
-        Parameters
-        ----------
-        grad_vec : list[float]
-            Raw accumulated update values (one per action) at a given infoset.
-        n_actions : int
-            Number of legal actions at this infoset.
+        return avg if total_samples > 0 else {}
 
-        Returns
-        -------
-        list[float]
-            Scaled and normalized update vector with controlled magnitude.
-        """
+    def _compute_advantages(self, avg_rewards: Dict[str, float]) -> Dict[str, float]:
+        """Max-baseline advantage: best action → 0, others ≤ 0."""
+        if not avg_rewards:
+            return {}
+
+        baseline = max(avg_rewards.values())
+        if baseline < 0:
+            return {a: r - baseline for a, r in avg_rewards.items()}
+        else:
+            return avg_rewards
+
+    def _l2_normalize_and_scale(self, grad_vec: list[float], n_actions: int) -> list[float]:
+        """L2 normalize so ||grad|| = lr * sqrt(n_actions)."""
         import math
-        lr = self.config["learning_rate"]
         norm = math.hypot(*grad_vec)
         if norm < 1e-12:
             return [0.0] * len(grad_vec)
-        desired = lr * math.sqrt(n_actions)
+        desired = self.config["learning_rate"] * math.sqrt(n_actions)
         return [g * (desired / norm) for g in grad_vec]
 
     def _apply_momentum_and_update(
             self,
             infoset: InfosetKey,
             actions: list[str],
-            normalized_grad: list[float],
-            initial_logit_range=0.1,
+            normalized_grad: list[float]
     ):
-        """
-        Apply momentum-filtered updates to policy logits and enforce numerical stability.
+        """Final step: momentum, update logits, max-normalize, clip."""
+        mom = self.config.get("momentum", 0.9)
+        min_logit = self.config.get("min_logit", -20.0)
+        init_range = self.config.get("init_range", 0.4)
 
-        This method:
-          - Integrates the normalized gradient into a velocity buffer using momentum,
-          - Updates logits using the new velocity,
-          - Initializes missing logits with small random values if needed,
-          - Normalizes logits so the maximum is 0 (equivalent to softmax invariance),
-          - Clips logits from below to avoid vanishing gradients (`min_logit` config).
-
-        Parameters
-        ----------
-        infoset : tuple[str, str]
-            The (hole_card, betting_branch) identifying the decision point.
-        actions : list[str]
-            Ordered list of actions corresponding to `normalized_grad`.
-        normalized_grad : list[float]
-            Gradient vector after L2 normalization and scaling.
-        initial_logit_range : float, optional
-            Range for uniform initialization of unseen action logits.
-
-        Side Effects
-        ------------
-        Modifies `self.logits[infoset]` and `self.update_momentum[infoset]` in place.
-        """
-        gamma = self.config.get("momentum", 0.9)
-        min_logit = -abs(self.config.get("min_logit", -20))
         logits = self.logits.setdefault(infoset, {})
         velocity = self.update_momentum.setdefault(infoset, {})
 
-        # === 1. Momentum update (raw, unbounded) ===
         for action, ng in zip(actions, normalized_grad):
-            old_v = velocity.get(action, 0.0)
-            new_v = gamma * old_v + (1.0 - gamma) * ng
-            velocity[action] = new_v
+            # Lazy random init on first update
+            if action not in logits:
+                logits[action] = self.rng.uniform(-init_range, init_range)
 
-            old_logit = logits.get(action, self.rng.uniform(-initial_logit_range, 0.))
-            logits[action] = old_logit + new_v
+            # Momentum update
+            v_old = velocity.get(action, 0.0)
+            v_new = mom * v_old + (1.0 - mom) * ng
+            velocity[action] = v_new
 
-        # === 2. Max-normalize: subtract the current maximum ===
+            # Apply to logit
+            logits[action] += v_new
+
+        # Max-normalize: best action → 0.0
         if logits:
-            max_logit = max(logits.values())
+            max_l = max(logits.values())
             for a in logits:
-                logits[a] -= max_logit
+                logits[a] = max(logits[a] - max_l, min_logit)
 
-        # === 3. Clip bottom at -20 (prevents numerical death) ===
-        for a in logits:
-            if logits[a] < min_logit:
-                logits[a] = min_logit
-
-    def _cleanup_empty_infoset(self, infoset: InfosetKey):
-        """Remove infoset completely if it has no logits left."""
-        if infoset not in self.logits or not self.logits[infoset]:
-            self.logits.pop(infoset, None)
-            self.update_momentum.pop(infoset, None)
-
-    def _apply_accumulated_updates(self, initial_logit_range=0.1):
-        """
-        Apply delayed policy updates after each training cycle to improve stability.
-
-        This method processes the accumulated gradient-like updates collected during
-        `n_epochs` self-play games and applies them to the policy logits using:
-          1. L2 normalization and scaling of the raw updates,
-          2. Momentum-based velocity integration,
-          3. Max-normalization of logits (so the best action has logit = 0),
-          4. Lower clipping to prevent logits from vanishing numerically.
-
-        Infers the full action support at each infoset by merging keys from logits,
-        accumulated updates, and momentum buffers. Empty infosets are cleaned up.
-
-        Parameters
-        ----------
-        initial_logit_range : float, optional
-            Range for initializing logits of previously unseen actions (default: 0.1).
-            Used only if an action appears in updates but not in current logits.
-        """
+    def _apply_accumulated_updates(self):
+        """Main update loop — now crystal clear and fully modular."""
         for infoset in list(self.accumulated.keys()):
-            raw_updates = self.accumulated[infoset]
-            if not raw_updates:
+            if infoset not in self.accumulated or not self.accumulated[infoset]:
                 continue
 
+            # Step 1: Compute average reward per action
+            avg_rewards = self._compute_average_rewards(infoset)
+            if not avg_rewards:
+                continue
+
+            # Step 2: Compute advantage with max-baseline (your genius idea)
+            advantages = self._compute_advantages(avg_rewards)
+
+            # Step 3: Get full action list and build gradient vector
             actions = sorted(self._get_all_actions(infoset))
-            if not actions:
+            grad_vec = [advantages.get(a, 0.0) for a in actions]
+
+            # Step 4: L2 normalize + scale by learning rate
+            normalized_grad = self._l2_normalize_and_scale(grad_vec, len(actions))
+            if not any(normalized_grad):
                 continue
 
-            grad_vec = [raw_updates.get(a, 0.0) for a in actions]
-            normalized = self._l2_normalize_and_scale(grad_vec, len(actions))
+            # Step 5: Apply momentum + update logits + max-norm + clip
+            self._apply_momentum_and_update(infoset, actions, normalized_grad)
 
-            has_update = self._apply_momentum_and_update(infoset, actions, normalized,
-                                                         initial_logit_range=initial_logit_range)
+            # >>> DEBUG <<<
+            # card, branch = infoset
+            # for move, v in self.accumulated[infoset].items():
+            #     if move == 'c' and len(branch)>1:
+            #         if card == "2":
+            #             if v > 0:
+            #                 print()
+            #                 print(f'{card} "{branch}"')
+            #                 print(actions)
+            #                 print(advantages)
+            #                 print(normalized_grad)
+            #                 print(self.accumulated[infoset])
+            #                 raise ValueError(f'Check out your reward!')
+            #         elif card == "A":
+            #             if v < 0:
+            #                 print()
+            #                 print(actions)
+            #                 print(advantages)
+            #                 print(normalized_grad)
+            #                 print(self.accumulated[infoset])
+            #                 raise ValueError(f'Check out your reward!')
 
-            if not has_update:
-                self._cleanup_empty_infoset(infoset)
-
+        # Clean up
         self.accumulated.clear()
+        self.action_counts.clear()
 
     # ------------------------------------------------------------------ #
     # Persistence
     # ------------------------------------------------------------------ #
-    def save(self, filepath: str | Path):
+    def save(self, filepath: str | Path, decimals=2):
         filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)  # ensure directory exists
+        filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        data = {
-            "logits": self.logits,
-            "games_played": self.games_played,
-            "config": self.config,
+        # Convert tuple keys to strings
+        serializable_logits = {
+            _serialize_infoset_key(k): round_floats(v, decimals) for k, v in self.logits.items()
         }
 
-        with filepath.open("wb") as f:
-            pickle.dump(data, f)
+        data = {
+            "logits": serializable_logits,
+            "games_played": self.games_played,
+            "config": round_floats(self.config, decimals),
+        }
 
-        print(f"\nPolicy saved to {filepath.resolve()}")
+        with filepath.open("w") as f:
+            json.dump(data, f, indent=2)
+
+        print(f"Policy saved to {filepath.resolve()}")
 
     @classmethod
     def load(cls, filepath: str | Path, **kwargs):
-        """
-        Load a saved policy and return a fully configured AgentRL instance.
-        Any config values passed in kwargs will OVERRIDE the saved ones.
-        """
         filepath = Path(filepath)
-
         if not filepath.exists():
             raise FileNotFoundError(f"Policy file not found: {filepath}")
 
-        with open(filepath, "rb") as f:
-            data = pickle.load(f)
+        with open(filepath, "r") as f:
+            data = json.load(f)
 
-        # === 1. Load saved data ===
-        saved_logits = data["logits"]
+        saved_logits_raw = data["logits"]
         saved_games_played = data.get("games_played", 0)
         saved_config = data.get("config", {})
 
-        # === 2. Merge config: kwargs wins over saved config ===
+        # Deserialize keys
+        saved_logits = {
+            _deserialize_infoset_key(k): v for k, v in saved_logits_raw.items()
+        }
+
         final_config = {**saved_config, **kwargs.get("config", {})}
 
-        # === 3. Create agent with correct training mode and RNG ===
         agent = cls(
-            rng=kwargs.get("rng"),  # fresh or seeded RNG
+            rng=kwargs.get("rng"),
             verbose=kwargs.get("verbose", False),
             config=final_config,
-            policy_path=None,  # prevent recursive load
-            training=kwargs.get("training", False),  # default: frozen for evaluation
+            policy_path=None,
+            name=kwargs.get("name", None),
+            training=kwargs.get("training", False),
         )
 
-        # === 4. Restore learned parameters ===
         agent.logits = saved_logits
-        agent.update_momentum = data.get("update_momentum", {})
+        # Note: update_momentum is not saved in JSON version (optional: add if needed)
         agent.games_played = saved_games_played
 
-        # === 5. FINAL SAFETY: force config override (in case someone forgets) ===
         if "config" in kwargs:
             agent.config = final_config
 
-        print(f"Policy loaded: {filepath.name}")
+        print(f"\nPolicy loaded: {filepath.name}")
         print(f"  • Trained for {agent.games_played:,} games")
         print(f"  • Learning rate: {agent.config['learning_rate']}")
         print(f"  • Training mode: {agent.training}")
 
         return agent
 
-    # ------------------------------------------------------------------ #
-    # Utilities
-    # ------------------------------------------------------------------ #
-    def reset_history(self):
-        self.history.clear()
-
 
 def load_rl_agent(
-        filepath: Path | str,
-        *,
-        verbose: bool = False,
-        training: bool = False,
+    filepath: Path | str,
+    *,
+    rng: random.Random | None = None,
+    verbose: bool = False,
+    training: bool = False,
 ) -> AgentRL:
-    """
-    Load an agent from disk.
-    """
-    filepath = Path(filepath)
+    """ Load RL agent."""
+    if rng is None:
+        rng = random.Random()
 
-    # Normal load path
+    filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"Model not found: {filepath}")
 
-    with open(filepath, "rb") as f:
-        data = pickle.load(f)
+    with open(filepath, "r") as f:
+        data = json.load(f)
 
-    # Agent must be NOT verbose in the tournament
-    agent = AgentRL(rng=random.Random(), verbose=False, training=training)
-    agent.logits = data["logits"]
-    agent.update_momentum = data.get("update_momentum", {})
-    agent.games_played = data.get("games_played", 0)
+    logits_raw = data["logits"]
+    logits = {_deserialize_infoset_key(k): v for k, v in logits_raw.items()}
+    games_played = data.get("games_played", 0)
+
+    agent = AgentRL(rng=rng, verbose=False, training=training, name=filepath.stem)
+    agent.logits = logits
+    agent.games_played = games_played
 
     if verbose:
-        print(f"  Loaded {filepath.name:30} → {agent.games_played / 10**6:.1f}M games")
+        if games_played < 10**6:
+            print(f"  Loaded {filepath.name:30} → {games_played / 10**3:.0f}K games")
+        else:
+            print(f"  Loaded {filepath.name:30} → {games_played / 10**6:.1f}M games")
 
     return agent
