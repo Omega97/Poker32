@@ -3,6 +3,9 @@ import math
 import json
 from pathlib import Path
 from typing import Dict, Any
+
+from sympy.external.gmpy import is_bpsw_prp
+
 from src.agent import Agent, InfosetKey
 from src.utils import round_floats
 
@@ -137,8 +140,8 @@ class AgentRL(Agent):
 
             position = state["positions"][player_id]
             reward = state["rewards"][position]
-            r0 = self.accumulated[infoset].get(action, 0.0)
-            self.accumulated[infoset][action] = r0 + lr * reward
+            r0 = self.accumulated[infoset].get(action, 0)
+            self.accumulated[infoset][action] = r0 + reward
 
             # >>> DEBUG reward <<<
             # hand, branch = infoset
@@ -245,25 +248,21 @@ class AgentRL(Agent):
 
         return avg if total_samples > 0 else {}
 
-    def _compute_advantages(self, avg_rewards: Dict[str, float]) -> Dict[str, float]:
-        """Max-baseline advantage: best action → 0, others ≤ 0."""
-        if not avg_rewards:
-            return {}
-
-        baseline = max(avg_rewards.values())
-        if baseline < 0:
-            return {a: r - baseline for a, r in avg_rewards.items()}
-        else:
-            return avg_rewards
-
-    def _l2_normalize_and_scale(self, grad_vec: list[float], n_actions: int) -> list[float]:
+    def _normalize_and_scale(self, grad_vec: list[float],
+                                n_actions: int,
+                                epsilon=1e-12) -> list[float]:
         """L2 normalize so ||grad|| = lr * sqrt(n_actions)."""
-        import math
-        norm = math.hypot(*grad_vec)
-        if norm < 1e-12:
-            return [0.0] * len(grad_vec)
+        # center
+        baseline = sum(grad_vec) / len(grad_vec)
+        # baseline = max(baseline, 0)
+        v = [g - baseline for g in grad_vec]
+
+        # normalize and scale
+        norm = math.hypot(*v)
+        if norm < epsilon:
+            return [0.0] * len(v)
         desired = self.config["learning_rate"] * math.sqrt(n_actions)
-        return [g * (desired / norm) for g in grad_vec]
+        return [g * (desired / norm) for g in v]
 
     def _apply_momentum_and_update(
             self,
@@ -273,8 +272,8 @@ class AgentRL(Agent):
     ):
         """Final step: momentum, update logits, max-normalize, clip."""
         mom = self.config.get("momentum", 0.9)
-        min_logit = self.config.get("min_logit", -20.0)
-        init_range = self.config.get("init_range", 0.4)
+        logit_range = self.config.get("logit_range", 10.0)
+        init_range = self.config.get("init_range", 0.1)
 
         logits = self.logits.setdefault(infoset, {})
         velocity = self.update_momentum.setdefault(infoset, {})
@@ -282,7 +281,7 @@ class AgentRL(Agent):
         for action, ng in zip(actions, normalized_grad):
             # Lazy random init on first update
             if action not in logits:
-                logits[action] = self.rng.uniform(-init_range, init_range)
+                logits[action] = self.rng.uniform(- init_range, + init_range)
 
             # Momentum update
             v_old = velocity.get(action, 0.0)
@@ -292,11 +291,29 @@ class AgentRL(Agent):
             # Apply to logit
             logits[action] += v_new
 
-        # Max-normalize: best action → 0.0
+        # Cap the logits between '-logit_range' and +'logit_range'.
         if logits:
-            max_l = max(logits.values())
             for a in logits:
-                logits[a] = max(logits[a] - max_l, min_logit)
+                # Damping effect
+                damping = self.config.get("damping", 0.99)
+                logits[a] *= damping
+
+                # Clipping
+                logits[a] = min(logits[a], logit_range)
+                logits[a] = max(logits[a], -logit_range)
+
+    def _clear_rewards_and_counts(self):
+        """
+        Clear rewards and counts.
+        If momentum is > 0, then apply gradual decay instead.
+        """
+        gamma = self.config.get("momentum", 0.)
+        if gamma <= 0:
+            self.accumulated.clear()
+            self.action_counts.clear()
+        else:
+            self.accumulated = {infoset: {k: v * gamma for k, v in d.items()} for infoset, d in self.accumulated.items()}
+            self.action_counts = {infoset: {k: v * gamma for k, v in d.items()} for infoset, d in self.action_counts.items()}
 
     def _apply_accumulated_updates(self):
         """Main update loop — now crystal clear and fully modular."""
@@ -309,22 +326,31 @@ class AgentRL(Agent):
             if not avg_rewards:
                 continue
 
-            # Step 2: Compute advantage with max-baseline (your genius idea)
-            advantages = self._compute_advantages(avg_rewards)
-
-            # Step 3: Get full action list and build gradient vector
+            # Step 2: Get full action list and build gradient vector
             actions = sorted(self._get_all_actions(infoset))
-            grad_vec = [advantages.get(a, 0.0) for a in actions]
+            grad_vec = [avg_rewards.get(a, 0.0) for a in actions]
 
-            # Step 4: L2 normalize + scale by learning rate
-            normalized_grad = self._l2_normalize_and_scale(grad_vec, len(actions))
+            # Step 3: L2 normalize + scale by learning rate
+            normalized_grad = self._normalize_and_scale(grad_vec, len(actions))
             if not any(normalized_grad):
                 continue
 
-            # Step 5: Apply momentum + update logits + max-norm + clip
+            # Step 4: Apply momentum + update logits + max-norm + clip
             self._apply_momentum_and_update(infoset, actions, normalized_grad)
 
             # >>> DEBUG <<<
+            # print(f'hand: {infoset[0]}')
+            # print(f'branch: "{infoset[1]}"')
+            # print('accumulated rewards:', self.accumulated.get(infoset, {}))
+            # print('avg_rewards:', [f"{k}: {v:.2f}" for k, v in avg_rewards.items()])
+            # print('update:', [f"{a}: {x:.3f}" for a, x in zip(actions, normalized_grad)])
+            # input()
+
+            # >>> DEBUG <<<
+            # if max(normalized_grad) < 0:
+            #     print('normalized_grad')
+            #     print(normalized_grad)
+            #     raise ValueError
             # card, branch = infoset
             # for move, v in self.accumulated[infoset].items():
             #     if move == 'c' and len(branch)>1:
@@ -347,8 +373,8 @@ class AgentRL(Agent):
             #                 raise ValueError(f'Check out your reward!')
 
         # Clean up
-        self.accumulated.clear()
-        self.action_counts.clear()
+        self._clear_rewards_and_counts()
+
 
     # ------------------------------------------------------------------ #
     # Persistence
