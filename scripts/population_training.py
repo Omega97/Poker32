@@ -10,7 +10,7 @@ class PopulationTrainer:
         "learning_rate": 0.05,
         "temperature": 1.0,
         "momentum": 0.9,
-        "min_logit": -10.0,
+        "logit_range": 10.0,
         "init_range": 0.2,
         "n_epochs": 1,
         "n_cycles": 1,
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     _CONFIG = {
         "learning_rate": 0.05,
         "momentum": 0.9,
-        "min_logit": -10.0
+        "logit_range": 10.0
     }
     # ---------------------------------------------------
 
