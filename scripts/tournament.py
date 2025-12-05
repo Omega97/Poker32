@@ -27,12 +27,6 @@ def play_match(agent_a, agent_b, n_hands: int, rng:random.Random | None = None):
         total_a += sorted_rewards[0]
         total_b += sorted_rewards[1]
 
-        # print()
-        # for k, v in result.items():
-        #     print(f'{k}: {v}')
-        # print(f'{total_a:.0f} {total_b:.0f}')
-        # input()
-
     return total_a / n_hands, total_b / n_hands
 
 
@@ -42,6 +36,7 @@ def run_tournament(
     rng: random.Random | None = None,
     figsize=(10, 8),
     cmap="RdYlGn",
+    name_length=20,
     save_plot: str | Path | None = "tournament_results.png"
 ):
     """
@@ -72,7 +67,7 @@ def run_tournament(
             name_a, name_b = names[i], names[j]
             agent_a, agent_b = agents[i], agents[j]
 
-            print(f"[{match_count:2d}/{total_matches}] {name_a:25} vs {name_b:25} ... ", end="", flush=True)
+            print(f"[{match_count:2d}/{total_matches}] {name_a:{name_length}} vs {name_b:{name_length}} ... ", end="", flush=True)
 
             rng = random.Random(i * n + j)
             ev_a, ev_b = play_match(agent_a, agent_b, n_hands, rng=rng)
@@ -116,11 +111,11 @@ def run_tournament(
     print("\n" + "=" * 100)
     print("NUMERIC RESULTS (row beats column)")
     print("=" * 100)
-    header = f"{'':25}" + "".join(f"{name:>12}" for name in names)
+    header = f"{'':{name_length}}" + "".join(f"{name:>12}" for name in names)
     print(header)
     print("-" * len(header))
     for i, name in enumerate(names):
-        row = f"{name:25}"
+        row = f"{name:{name_length}}"
         for j in range(n):
             val = results_matrix[i, j]
             cell = "    —    " if i == j else f"{val:+8.3f}"
@@ -135,7 +130,7 @@ if __name__ == "__main__":
     # _MODELS_DIR = Path("..") / "models" / "tournament_2025"
 
     _PLOT_PATH = Path("..") / "data" / "tournament_heatmap.png"
-    _N_HAND = 20_000
+    _N_HAND = 5_000
     _RNG = random.Random(0)
     # ---------------------------------------------------
 
