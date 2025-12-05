@@ -1,8 +1,7 @@
-import pickle
-import math
 from pathlib import Path
 from src.rl_agent import AgentRL
-from src.poker32 import Poker32, GAME_MOVES
+from src.poker32 import Poker32
+from src.utils import inspect_policy
 
 
 _MODEL_NAME = "new"
@@ -48,48 +47,7 @@ def test_training(file_path=_POLICY_PATH):
 
 
 def test_inspect_policy(path: str = _POLICY_PATH, show_proba: bool = True):
-    with open(path, "rb") as f:
-        data = pickle.load(f)
-
-    print(f"Trained for {data['games_played']:,} games")
-    print(f"Config: {data['config']}")
-    print(f"Total infosets learned: {len(data['logits'])}")  # 416
-    print()
-
-    if show_proba:
-        print("Softmax probabilities (min-normalized logits):")
-    else:
-        print("Max-normalized logits (best action = 0.00):")
-
-    # Sort for consistent output
-    for (hole, branch), action_dict in sorted(data['logits'].items()):
-        if not action_dict:
-            continue  # safety
-
-        s = f'"{branch}"'
-        print(f'{hole} {s:7}', end=' →  ')
-
-        logits = list(action_dict.values())
-        actions = list(action_dict.keys())
-
-        if show_proba:
-            # Min-normalization + softmax
-            min_l = min(logits)
-            exps = [math.exp(l - min_l) for l in logits]
-            total = sum(exps)
-            probs = [e / total for e in exps]
-
-            for act, p in zip(actions, probs):
-                print(f"{act} ={p:6.1%}", end="  ")
-        else:
-            # Max-normalization: best action = 0.0
-            max_l = max(logits)
-            for act, l in zip(actions, logits):
-                normalized = l - max_l
-                print(f"{act} ={normalized:5.1f}", end="  ")
-
-        print()  # newline
-    print("\nInspection complete.")
+    inspect_policy(path, show_proba)
 
 
 if __name__ == '__main__':
