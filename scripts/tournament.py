@@ -7,16 +7,31 @@ from src.poker32 import Poker32
 from src.rl_agent import load_rl_agent
 
 
-def play_match(agent_a, agent_b, n_hands: int, seed: int):
-    rng = random.Random(seed)
+def play_match(agent_a, agent_b, n_hands: int, rng:random.Random | None = None):
+    """
+    Play n_hands between the agents.
+    """
+    if rng is None:
+        rng = random.Random()
+
     game = Poker32(rng=rng)
 
     total_a = total_b = 0.0
     for _ in range(n_hands):
-        result = game.play((agent_a, agent_b), verbose=False)
-        rew_a, rew_b = result["rewards"]
-        total_a += rew_a
-        total_b += rew_b
+        result = game.play((agent_a, agent_b))
+
+        rewards = result["rewards"]
+        positions = result["positions"]
+
+        sorted_rewards = [rewards[positions[i]] for i in range(2)]
+        total_a += sorted_rewards[0]
+        total_b += sorted_rewards[1]
+
+        # print()
+        # for k, v in result.items():
+        #     print(f'{k}: {v}')
+        # print(f'{total_a:.0f} {total_b:.0f}')
+        # input()
 
     return total_a / n_hands, total_b / n_hands
 
@@ -24,19 +39,23 @@ def play_match(agent_a, agent_b, n_hands: int, seed: int):
 def run_tournament(
     models_dir: str | Path = "models",
     n_hands: int = 100_000,
-    seed: int = 42,
+    rng: random.Random | None = None,
     figsize=(10, 8),
     cmap="RdYlGn",
-    save_plot: str | None = "tournament_results.png"
+    save_plot: str | Path | None = "tournament_results.png"
 ):
+    """
+    Note: Poker instance is deterministic.
+    """
     models_dir = Path(models_dir)
-    model_files = sorted(models_dir.glob("*.pkl"))
+    # 🔁 CHANGE: look for .json instead of .pkl
+    model_files = sorted(models_dir.glob("*.json"))
     if not model_files:
-        print("No .pkl models found in models/ folder!")
+        print(f"No .json models found in {models_dir}/ folder!")
         return
 
     print(f"Loading {len(model_files)} agents...")
-    agents = [load_rl_agent(p, verbose=True, training=False) for p in model_files]
+    agents = [load_rl_agent(p, rng=rng, verbose=True, training=False) for p in model_files]
     names = [p.stem for p in model_files]
 
     n = len(agents)
@@ -55,7 +74,8 @@ def run_tournament(
 
             print(f"[{match_count:2d}/{total_matches}] {name_a:25} vs {name_b:25} ... ", end="", flush=True)
 
-            ev_a, ev_b = play_match(agent_a, agent_b, n_hands, seed + i * n + j)
+            rng = random.Random(i * n + j)
+            ev_a, ev_b = play_match(agent_a, agent_b, n_hands, rng=rng)
 
             results_matrix[i, j] = ev_a
             results_matrix[j, i] = ev_b
@@ -110,9 +130,19 @@ def run_tournament(
 
 
 if __name__ == "__main__":
+    # ------------------ CONFIGURATION ------------------
+    _MODELS_DIR = Path("..") / "models"
+    # _MODELS_DIR = Path("..") / "models" / "tournament_2025"
+
+    _PLOT_PATH = Path("..") / "data" / "tournament_heatmap.png"
+    _N_HAND = 20_000
+    _RNG = random.Random(0)
+    # ---------------------------------------------------
+
+    # Run tournament
     run_tournament(
-        models_dir="..\\models",
-        n_hands=10_000,
-        seed=42,
-        save_plot="..\\data\\tournament_heatmap.png"
+        models_dir=_MODELS_DIR,
+        n_hands=_N_HAND,
+        rng=_RNG,
+        save_plot=_PLOT_PATH,
     )
