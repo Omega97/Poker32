@@ -14,7 +14,7 @@ def test_training(file_path=_POLICY_PATH):
     config = {
         "learning_rate": 0.05,
         "temperature": 1.0,
-        "min_logit": -10,
+        "logit_range": 10,
         "momentum": 0.9,
         "n_epochs": 20_000,
         "n_cycles": 300,
