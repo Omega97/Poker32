@@ -21,7 +21,7 @@ def test_game_initialisation():
     game = poker.Poker32()
     assert game.button == 0
     assert game.hole_cards == ["A", "6"]
-    game._init_holes(holes=["Q", "Q"])
+    game._init_hole_cards(holes=["Q", "Q"])
     assert game.hole_cards == ["Q", "Q"]
 
     print('test_game_initialisation passed!')
@@ -52,13 +52,13 @@ def test_game_tree():
 def test_game():
     """Ensure the game object starts in the expected state."""
     game = poker.Poker32()
-    state = game.get_subjective_state(0)
+    state = game._get_subjective_state(0)
     print(state)
     print(game.get_legal_moves())
     game.make_move('f')
-    assert game.get_subjective_state(0)['branch'] == 'f'
+    assert game._get_subjective_state(0)['branch'] == 'f'
     assert game.is_game_over() is True
-    assert game.get_rewards() == (-1, 1)
+    assert game.get_relative_rewards() == (-1, 1)
 
     print('test_game_initialisation passed!')
 
