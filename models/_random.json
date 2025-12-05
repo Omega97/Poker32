@@ -1,0 +1,12 @@
+{
+  "logits": {},
+  "games_played": 250,
+  "config": {
+    "learning_rate": 0.0,
+    "temperature": 1.0,
+    "n_epochs": 50,
+    "n_cycles": 5,
+    "min_logit": -10.0,
+    "momentum": 0.0
+  }
+}
