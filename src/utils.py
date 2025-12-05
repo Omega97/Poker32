@@ -29,7 +29,7 @@ def inspect_policy(file_path: str | Path, show_proba: bool = True):
     if show_proba:
         print("Softmax probabilities (min-normalized logits):")
     else:
-        print("Max-normalized logits (best action = 0.00):")
+        print("Logits")
 
     # Sort for consistent output
     rank_index = {rank: i for i, rank in enumerate(RANKS)}
@@ -61,10 +61,10 @@ def inspect_policy(file_path: str | Path, show_proba: bool = True):
                     print(f"{act}:{p:6.1%}", end="  ")
         else:
             # Max-normalization: best action = 0.0
-            max_l = max(logits_list)
+            # max_l = max(logits_list)
             for act, l in zip(actions_list, logits_list):
-                normalized = l - max_l
-                print(f"{act}:{normalized:5.1f}", end="  ")
+                # normalized = l - max_l
+                print(f"{act}:{l:5.1f}", end="  ")
 
         print()  # newline
 
