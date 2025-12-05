@@ -6,7 +6,7 @@
     "temperature": 1.0,
     "n_epochs": 50,
     "n_cycles": 5,
-    "min_logit": -10.0,
+    "logit_range": 10.0,
     "momentum": 0.0
   }
 }

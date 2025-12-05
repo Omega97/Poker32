@@ -2048,7 +2048,7 @@
     "temperature": 1.0,
     "n_epochs": 10000,
     "n_cycles": 200,
-    "min_logit": -10,
+    "logit_range": 10,
     "momentum": 0.9
   }
 }
