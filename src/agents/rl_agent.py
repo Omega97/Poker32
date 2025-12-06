@@ -3,9 +3,6 @@ import math
 import json
 from pathlib import Path
 from typing import Dict, Any
-
-from sympy.external.gmpy import is_bpsw_prp
-
 from src.agent import Agent, InfosetKey
 from src.utils import round_floats
 
@@ -143,24 +140,6 @@ class AgentRL(Agent):
             r0 = self.accumulated[infoset].get(action, 0)
             self.accumulated[infoset][action] = r0 + reward
 
-            # >>> DEBUG reward <<<
-            # hand, branch = infoset
-            # if len(state["branch"]) > 1 and state["branch"][-1:] == 'c':
-            #     if hand == '2':
-            #         if reward > 0:
-            #             print()
-            #             print(infoset)
-            #             for k, v in state.items():
-            #                 print(f"{k}: {v}")
-            #             raise ValueError('Reward!')
-            #     if hand == 'A':
-            #         if reward < 0:
-            #             print()
-            #             print(infoset)
-            #             for k, v in state.items():
-            #                 print(f"{k}: {v}")
-            #             raise ValueError('Reward!')
-
             if infoset not in self.action_counts:
                 self.action_counts[infoset] = {}
             c0 = self.action_counts[infoset].get(action, 0)
@@ -188,22 +167,6 @@ class AgentRL(Agent):
               - 'position': this agent's player index
               - other metadata (unused here)
         """
-
-        # >>> Debug <<<
-        # player_id = state["player_id"]
-        # position: str = state["position"]
-        # reward = state["rewards"][position]
-        # branch = state["branch"]
-        # hole_card = state["hole_cards"][player_id]
-        # if branch[-1] == 'c':
-        #     if hole_card == '2':
-        #         if reward > 0:
-        #             print(state)
-        #             raise ValueError('Check your reward!')
-        #     if hole_card == 'A':
-        #         if reward < 0:
-        #             print(state)
-        #             raise ValueError('Check your reward!')
 
         # Terminate if training mode is not ON
         if not self.training:
@@ -337,40 +300,6 @@ class AgentRL(Agent):
 
             # Step 4: Apply momentum + update logits + max-norm + clip
             self._apply_momentum_and_update(infoset, actions, normalized_grad)
-
-            # >>> DEBUG <<<
-            # print(f'hand: {infoset[0]}')
-            # print(f'branch: "{infoset[1]}"')
-            # print('accumulated rewards:', self.accumulated.get(infoset, {}))
-            # print('avg_rewards:', [f"{k}: {v:.2f}" for k, v in avg_rewards.items()])
-            # print('update:', [f"{a}: {x:.3f}" for a, x in zip(actions, normalized_grad)])
-            # input()
-
-            # >>> DEBUG <<<
-            # if max(normalized_grad) < 0:
-            #     print('normalized_grad')
-            #     print(normalized_grad)
-            #     raise ValueError
-            # card, branch = infoset
-            # for move, v in self.accumulated[infoset].items():
-            #     if move == 'c' and len(branch)>1:
-            #         if card == "2":
-            #             if v > 0:
-            #                 print()
-            #                 print(f'{card} "{branch}"')
-            #                 print(actions)
-            #                 print(advantages)
-            #                 print(normalized_grad)
-            #                 print(self.accumulated[infoset])
-            #                 raise ValueError(f'Check out your reward!')
-            #         elif card == "A":
-            #             if v < 0:
-            #                 print()
-            #                 print(actions)
-            #                 print(advantages)
-            #                 print(normalized_grad)
-            #                 print(self.accumulated[infoset])
-            #                 raise ValueError(f'Check out your reward!')
 
         # Clean up
         self._clear_rewards_and_counts()
