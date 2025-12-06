@@ -1,20 +1,22 @@
 import random
-from src.rl_agent import AgentRL
+import pathlib
+from src.agents.rl_agent import AgentRL
 from src.poker32 import Poker32
 
 
-def training(file_path,
-             config,
+def training(agent_class,
+             file_path: pathlib.Path,
+             config: dict,
              name='training_agent',
              rng: random.Random | None = None):
 
     # Load the agent with training mode enabled
     if file_path.exists():
         print(f"Loading existing policy from {file_path}")
-        agent = AgentRL.load(str(file_path),
-                             config=config,
-                             name=name,
-                             training=True)
+        agent = agent_class.load(str(file_path),
+                                 config=config,
+                                 name=name,
+                                 training=True)
         print(f"Resuming from {agent.games_played:,} games")
     else:
         print("No existing policy found → starting from scratch")
