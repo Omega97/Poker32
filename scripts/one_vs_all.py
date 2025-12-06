@@ -6,8 +6,8 @@ Usage:
 """
 import random
 from pathlib import Path
-from src.rl_agent import load_rl_agent, AgentRL
 from src.poker32 import Poker32
+from src.agents.rl_agent import load_rl_agent, AgentRL
 
 
 class OneVsAllTrainer:

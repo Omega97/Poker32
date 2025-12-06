@@ -1,15 +1,23 @@
 import random
 from pathlib import Path
+import pathlib
 from src.utils import inspect_policy
 from src.training import training
+from src.agents.rl_agent import AgentRL
 
 
 if __name__ == '__main__':
     # ------------------ CONFIGURATION ------------------
 
-    # Model info
-    _MODEL_NAME = "new7"
+    _MODEL_NAME = pathlib.Path(__file__).stem.split("_")[-1]
     _POLICY_PATH = Path(f"..\\..\\models\\{_MODEL_NAME}.json")
+    _AGENT_CLASS = AgentRL
+
+    # ---------- safety check ----------
+    if _POLICY_PATH.exists() and _POLICY_PATH.stat().st_size:
+        ans = input(f"{_POLICY_PATH.name} already exists – overwrite?")
+    else:
+        print(f'Training "{_MODEL_NAME}" ({_POLICY_PATH})')
 
     # Config
     _RNG = random.Random(42)
@@ -24,15 +32,15 @@ if __name__ == '__main__':
 
     # ---------------- TRAINING PIPELINE ----------------
 
-    training(file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
     _CONFIG["damping"] = 0.9
-    training(file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
     _CONFIG["damping"] = 0.95
-    training(file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
     _CONFIG["damping"] = 0.98
-    training(file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
     _CONFIG["damping"] = 0.99
-    training(file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
 
     # --------------- INSPECT THE RESULTS ---------------
 
