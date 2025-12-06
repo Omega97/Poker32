@@ -1,7 +1,7 @@
 # scripts/population_training.py
 import random
 from pathlib import Path
-from src.rl_agent import AgentRL
+from src.agents.rl_agent import AgentRL
 from src.poker32 import Poker32
 
 
@@ -22,21 +22,17 @@ class PopulationTrainer:
         n_hands: int = 1_000_000,
         config: dict | None = None,
         save_dir: str | Path = "models/population",
-        seed: int | None = 42,
+        rng: random.Random | None = None,
     ):
         self.n_agents = n_agents
         self.n_hands = n_hands
         self.save_dir = Path(save_dir)
-        self.seed = seed
+        self.rng = rng
 
         # Merge config
         self.config = dict(self.DEFAULT_CONFIG)
         if config:
             self.config.update(config)
-
-        # RNG
-        random.seed(self.seed)
-        self.rng = random.Random(self.seed)
 
         # Prepare directory
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +80,7 @@ class PopulationTrainer:
 
         for hand in range(1, self.n_hands + 1):
             a1, a2 = random.sample(self.agents, 2)
-            game.play((a1, a2), verbose=False)
+            game.play((a1, a2))
 
             if hand % 50_000 == 0 or hand == self.n_hands:
                 print(f"Hand {hand:,}")
@@ -102,19 +98,27 @@ class PopulationTrainer:
 
 if __name__ == "__main__":
     # ------------------ CONFIGURATION ------------------
-    _CONFIG = {
-        "learning_rate": 0.05,
-        "momentum": 0.9,
-        "logit_range": 10.0
-    }
+    _N_HANDS = 5_000_000
+    _N_AGENTS = 3
+
+    _RNG = random.Random(0)
+    _DIR_PATH = "../models/tournament_2025"
+    _CONFIG = {"learning_rate": 0.05,  # step length for each spot
+               "temperature": 1.0,  # modifier for the policy sampling
+               "init_range": 0.1,  # initial range for the logits
+               "logit_range": 20,  # logits are capped between +/- this value
+               "momentum": 0.995,  # decay on accumulated rewards and counts
+               "damping": 0.995,  # attract the logits towards zero
+               }
+
     # ---------------------------------------------------
 
     # Run population-based tournament
     trainer = PopulationTrainer(
-        n_agents=9,
-        n_hands=1_000_000,
+        n_agents=_N_AGENTS,
+        n_hands=_N_HANDS,
         config=_CONFIG,
-        save_dir="../models/tournament_2025",
-        seed=0,
+        save_dir=_DIR_PATH,
+        rng=_RNG,
     )
     trainer.train()
