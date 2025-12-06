@@ -37,6 +37,7 @@ def run_tournament(
     figsize=(10, 8),
     cmap="RdYlGn",
     name_length=12,
+    vlim=1.0,
     save_plot: str | Path | None = "tournament_results.png"
 ):
     """
@@ -83,7 +84,7 @@ def run_tournament(
 
     # === PLOT HEATMAP ===
     plt.figure(figsize=figsize)
-    im = plt.imshow(results_matrix, cmap=cmap, vmin=-2.0, vmax=2.0, interpolation='nearest')
+    im = plt.imshow(results_matrix, cmap=cmap, vmin=-vlim, vmax=vlim, interpolation='nearest')
 
     plt.colorbar(im, label="Chips per hand (row vs column)", shrink=0.8)
     plt.title(f"Poker32 Round-Robin Tournament\n{n_hands:,} hands per match | "
@@ -128,10 +129,11 @@ def run_tournament(
 if __name__ == "__main__":
     # ------------------ CONFIGURATION ------------------
     _MODELS_DIR = Path("..") / "models"
+    # _MODELS_DIR = Path("..") / "models" / "my_models"
     # _MODELS_DIR = Path("..") / "models" / "tournament_2025"
 
     _PLOT_PATH = Path("..") / "data" / "tournament_heatmap.png"
-    _N_HAND = 4_000
+    _N_HAND = 10_000
     _RNG = random.Random(0)
     # ---------------------------------------------------
 

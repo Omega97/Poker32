@@ -1,3 +1,4 @@
+"""Base AgentRL class"""
 import random
 import math
 import json
@@ -55,7 +56,6 @@ class AgentRL(Agent):
     # ------------------------------------------------------------------ #
     # Action selection
     # ------------------------------------------------------------------ #
-
     @staticmethod
     def _get_infoset_key(state: dict) -> InfosetKey:
         """
@@ -275,8 +275,10 @@ class AgentRL(Agent):
             self.accumulated.clear()
             self.action_counts.clear()
         else:
-            self.accumulated = {infoset: {k: v * gamma for k, v in d.items()} for infoset, d in self.accumulated.items()}
-            self.action_counts = {infoset: {k: v * gamma for k, v in d.items()} for infoset, d in self.action_counts.items()}
+            self.accumulated = {infoset: {k: v * gamma for k, v in d.items()}
+                                for infoset, d in self.accumulated.items()}
+            self.action_counts = {infoset: {k: v * gamma for k, v in d.items()}
+                                  for infoset, d in self.action_counts.items()}
 
     def _apply_accumulated_updates(self):
         """Main update loop — now crystal clear and fully modular."""
@@ -303,7 +305,6 @@ class AgentRL(Agent):
 
         # Clean up
         self._clear_rewards_and_counts()
-
 
     # ------------------------------------------------------------------ #
     # Persistence

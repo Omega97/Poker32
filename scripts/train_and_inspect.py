@@ -1,15 +1,15 @@
 import random
 from pathlib import Path
 from src.utils import inspect_policy
-from src.training import training
 from src.agents.rl_agent import AgentRL
+from src.training import training
 
 
 if __name__ == '__main__':
     # ------------------ CONFIGURATION ------------------
 
     # Model info
-    _MODEL_NAME = "_test"
+    _MODEL_NAME = "a8"
     _AGENT_CLASS = AgentRL
     _POLICY_PATH = Path(f"..\\models\\{_MODEL_NAME}.json")
     # _POLICY_PATH = Path(f"..\\models\\tournament_2025\\{_MODEL_NAME}.json")
@@ -27,7 +27,7 @@ if __name__ == '__main__':
 
     # ---------------- TRAINING PIPELINE ----------------
 
-    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    # training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
 
     # --------------- INSPECT THE RESULTS ---------------
 

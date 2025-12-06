@@ -1,0 +1,1022 @@
+C:\Users\monfalcone\PycharmProjects\Poker32\src\agents
+
+================================================================
+agent_chatgpt.py
+================================================================
+"""ChatGPT agent v1"""
+import math
+from src.agents.rl_agent import AgentRL
+from src.poker32 import RANK_TO_IDX, N_RANKS
+
+
+class AgentRefined(AgentRL):
+    """
+    Refined tabular policy updater.
+
+    Key features / inspirations:
+      - Max-baseline advantage (as in AgentEquilibrium) for stable policy gradients.
+      - Entropy regularization to avoid premature collapse.
+      - Per-infoset *hand-strength bias* (intrinsic prior) that discourages
+        risky calls with very weak hole cards (addresses the '2 should never call' failure).
+      - Adaptive per-infoset penalty on the 'call' action for weak cards (soft constraint).
+      - L2-normalization of gradient + momentum + damping + clipping (familiar mechanics).
+      - All external hyperparameters have defaults inside this method.
+    """
+
+    def _apply_accumulated_updates(self):
+        # ------------- Defaults (can be overridden in self.config) -------------
+        lr = self.config.get("learning_rate", 0.08)
+        momentum = self.config.get("momentum", 0.90)
+        entropy_beta = self.config.get("entropy_bonus", 0.012)
+        logit_range = self.config.get("logit_range", 20.0)
+        init_range = self.config.get("init_range", 0.12)
+        damping = self.config.get("damping", 0.99)
+        min_logit = -self.config.get("logit_range", 20.0)
+        # Hand-strength related defaults
+        hand_bias_scale = self.config.get("hand_bias_scale", 1.8)   # how strongly hand strength shifts baseline
+        call_penalty_base = self.config.get("call_penalty_base", 1.5)  # base penalty on 'call' for weak hands
+        call_penalty_exponent = self.config.get("call_penalty_exponent", 2.0)  # non-linear scaling
+        force_zero_call_for = set(self.config.get("force_zero_call_for", ["2"]))  # optionally force certain cards
+        eps = 1e-12
+
+        # Iterate all infosets that gathered signals this cycle
+        for infoset, reward_dict in list(self.accumulated.items()):
+            if not reward_dict:
+                continue
+
+            counts = self.action_counts.get(infoset, {})
+            # Average rewards per-action for this cycle
+            avg_rewards = {
+                a: reward_dict[a] / counts[a]
+                for a in reward_dict
+                if counts.get(a, 0) > 0
+            }
+            if not avg_rewards:
+                continue
+
+            # Actions considered at this infoset
+            logits = self.logits.setdefault(infoset, {})
+            legal = sorted(self._get_all_actions(infoset))
+
+            # Ensure immortal actions initialized lazily
+            for a in legal:
+                if a not in logits:
+                    logits[a] = self.rng.uniform(-init_range, +init_range)
+
+            # --- Hand strength prior (based on infoset's hole card) ---
+            # infoset is (hole_card, branch)
+            hole = infoset[0] if isinstance(infoset, tuple) and len(infoset) >= 1 else None
+            # default neutral strength
+            if hole and hole in RANK_TO_IDX:
+                # higher numeric strength -> stronger hand (A strongest -> idx 0)
+                idx = RANK_TO_IDX[hole]
+                strength = (N_RANKS - idx) / N_RANKS  # in (0,1], A close to 1, '2' close to 1/N_RANKS
+                # normalize to [0,1]
+                # strength already mapped A -> near 1, 2 -> near 1/N_RANKS
+            else:
+                strength = 0.5
+
+            # Compute baseline: max(avg_rewards) with non-negative floor, then adjust by hand-strength bias
+            baseline = max(max(avg_rewards.values()), 0.0)
+            # Shift baseline downward for weak hands (so advantages for raises must overcome lower baseline less)
+            # We subtract a bias proportional to (0.5 - strength) so weak hands (strength < 0.5) get negative shift
+            hand_bias = hand_bias_scale * (0.5 - strength)
+            baseline = baseline - hand_bias
+
+            # --- Entropy precomputation (current policy) ---
+            action_logits = [logits[a] for a in legal]
+            max_l = max(action_logits)
+            shifted = [l - max_l for l in action_logits]
+            exps = [math.exp(l) for l in shifted]
+            total = sum(exps) or 1.0
+            probs = {a: e / total for a, e in zip(legal, exps)}
+
+            # --- Prepare advantage + entropy bonus per action ---
+            advantages = {a: (avg_rewards.get(a, 0.0) - baseline) for a in legal}
+
+            # Entropy term (per-action): proportional to (log p + 1) as in AgentEquilibrium
+            entropy = -sum(p * math.log(p + eps) for p in probs.values())
+            entropy_bonus = {a: entropy_beta * (math.log(probs[a] + eps) + 1.0) for a in legal}
+
+            # --- Call-action penalty for weak hands (softly discourages calling with weak cards) ---
+            # Penalty scales non-linearly with weakness: weaker -> bigger penalty
+            # penalty = call_penalty_base * (max(0, 0.5 - strength))**exponent
+            weakness = max(0.0, 0.5 - strength)
+            call_penalty = call_penalty_base * (weakness ** call_penalty_exponent)
+
+            # If explicitly forcing certain cards never to call (e.g., '2'), apply a very large penalty
+            force_no_call = (hole in force_zero_call_for)
+
+            # --- Build gradient vector combining advantage, entropy, and exploration/penalty ---
+            grad = {}
+            for a in legal:
+                adv = advantages.get(a, 0.0)
+                ent = entropy_bonus.get(a, 0.0)
+                g = adv + ent
+
+                # Penalize 'c' (call) if hand is weak
+                if a == 'c':
+                    if force_no_call:
+                        # Very strong hard penalty (effectively zero probability)
+                        g -= max(100.0, logit_range * 10.0)
+                    else:
+                        g -= call_penalty
+
+                grad[a] = g
+
+            # --- L2 normalize + scale to learning budget ---
+            vec = [grad[a] for a in legal]
+            # center by mean to remove uniform shift
+            mean_vec = sum(vec) / len(vec)
+            centered = [v - mean_vec for v in vec]
+            norm = math.hypot(*centered) or 1.0
+            scale = lr * math.sqrt(len(legal)) / norm
+            normalized = [v * scale for v in centered]
+
+            # --- Momentum + update + ensure immortality for unseen actions ---
+            velocity = self.update_momentum.setdefault(infoset, {})
+            for a, delta in zip(legal, normalized):
+                if a not in logits:
+                    logits[a] = self.rng.uniform(-init_range, +init_range)
+                v_old = velocity.get(a, 0.0)
+                v_new = momentum * v_old + (1.0 - momentum) * delta
+                velocity[a] = v_new
+                logits[a] += v_new
+
+            # --- Max-normalize + floor at min_logit (keeps diversity and avoids drift) ---
+            if logits:
+                max_after = max(logits.values())
+                for a in list(logits.keys()):
+                    logits[a] = max(logits[a] - max_after, min_logit)
+
+            # --- Damping + clipping ---
+            for a in legal:
+                logits[a] *= damping
+                if logits[a] > logit_range:
+                    logits[a] = logit_range
+                elif logits[a] < -logit_range:
+                    logits[a] = -logit_range
+
+        # --- Clean / decay accumulators similarly to AgentRL ---
+        gamma = self.config.get("momentum", 0.0)
+        if gamma <= 0:
+            self.accumulated.clear()
+            self.action_counts.clear()
+        else:
+            self.accumulated = {
+                infoset: {k: v * gamma for k, v in d.items()}
+                for infoset, d in self.accumulated.items()
+            }
+            self.action_counts = {
+                infoset: {k: v * gamma for k, v in d.items()}
+                for infoset, d in self.action_counts.items()
+            }
+
+================================================================
+agent_gemini.py
+================================================================
+"""Gemini agent v1"""
+import math
+from src.agents.rl_agent import AgentRL
+
+
+class AgentMellow(AgentRL):
+    """
+    AgentMellow:
+    1. Uses a Softmax-weighted (Mellow) baseline instead of Max-baseline.
+       This ensures the 'best' action gets a positive advantage signal (Reward > Baseline),
+       accelerating convergence compared to Max-baseline (Reward == Baseline).
+    2. Adopts the 'Concentration Bonus' found in Grok/Kimi/Qwen (positive log probability),
+       which encourages the agent to commit to the best strategy found rather than
+       remaining eternally uncertain.
+    """
+
+    def _apply_accumulated_updates(self):
+        # --- Configuration ---
+        lr = self.config.get("learning_rate", 0.1)
+        momentum = self.config.get("momentum", 0.9)
+        # Note: Positive beta here encourages "Concentration" (Exploitation)
+        entropy_beta = self.config.get("entropy_bonus", 0.01)
+        logit_range = self.config.get("logit_range", 20.0)
+        damping = self.config.get("damping", 0.99)
+        # 'tau' controls the baseline softness.
+        # tau=1.0 matches the sampling temperature.
+        tau = self.config.get("temperature", 1.0)
+
+        # --- Update Loop ---
+        for infoset, reward_dict in list(self.accumulated.items()):
+            if not reward_dict:
+                continue
+
+            # 1. Compute Average Rewards (Q-values) for visited actions
+            counts = self.action_counts.get(infoset, {})
+            avg_rewards = {
+                a: reward_dict[a] / counts[a]
+                for a in reward_dict
+                if counts.get(a, 0) > 0
+            }
+            if not avg_rewards:
+                continue
+
+            # Get all known actions to ensure vector alignment
+            actions = sorted(self._get_all_actions(infoset))
+
+            # 2. Compute Mellow Baseline
+            # Baseline = Sum(w_i * Q_i) / Sum(w_i), where w_i = exp(Q_i / tau)
+            # We only use rewards observed *this cycle* to calculate the baseline
+            # to prevent stale data from dragging the baseline down.
+            valid_qs = [avg_rewards[a] for a in actions if a in avg_rewards]
+
+            if not valid_qs:
+                baseline = 0.0
+            else:
+                max_q = max(valid_qs)
+                # Softmax weights (numerically stable)
+                shift_qs = [(q - max_q) / tau for q in valid_qs]
+                exps = [math.exp(sq) for sq in shift_qs]
+                sum_exps = sum(exps)
+
+                if sum_exps > 0:
+                    weights = [e / sum_exps for e in exps]
+                    baseline = sum(w * q for w, q in zip(weights, valid_qs))
+                else:
+                    baseline = max_q
+
+            # 3. Compute Advantages
+            # Adv(a) = Q(a) - Baseline
+            # Note: Best action usually has Q > Baseline, getting a POSITIVE signal.
+            advantages = {}
+            for a in actions:
+                # If action wasn't visited, we treat Q as 0.0 (neutral assumption)
+                q = avg_rewards.get(a, 0.0)
+                advantages[a] = q - baseline
+
+            # 4. Compute Concentration Bonus (The "Winner's Term")
+            # Calculate current policy probabilities
+            logits = self.logits.setdefault(infoset, {})
+            for a in actions:
+                if a not in logits:
+                    logits[a] = self.rng.uniform(-0.1, 0.1)
+
+            action_logits = [logits[a] for a in actions]
+            max_l = max(action_logits)
+            e_logits = [math.exp(l - max_l) for l in action_logits]
+            sum_e = sum(e_logits)
+            probs = [e / sum_e for e in e_logits]
+
+            # Bonus = beta * (log(p) + 1).
+            # High prob -> Positive update. Low prob -> Negative update.
+            # This pushes the agent towards a pure strategy (Nash Equilibrium).
+            conc_bonus = {}
+            for i, a in enumerate(actions):
+                p = probs[i]
+                log_p = math.log(p + 1e-12)
+                conc_bonus[a] = entropy_beta * (log_p + 1.0)
+
+            # 5. Form Gradient & Normalize
+            grads = [advantages[a] + conc_bonus[a] for a in actions]
+
+            # L2 Normalization scaled by sqrt(N) (Standard from Grok/Qwen)
+            norm = math.hypot(*grads) or 1.0
+            scale_factor = lr * math.sqrt(len(actions)) / norm
+            scaled_grads = [g * scale_factor for g in grads]
+
+            # 6. Momentum & Update
+            velocity = self.update_momentum.setdefault(infoset, {})
+            for i, a in enumerate(actions):
+                delta = scaled_grads[i]
+
+                # Momentum (Polyak)
+                v_old = velocity.get(a, 0.0)
+                v_new = momentum * v_old + (1.0 - momentum) * delta
+                velocity[a] = v_new
+
+                # Apply
+                logits[a] += v_new
+
+                # Damping & Clipping
+                logits[a] *= damping
+                logits[a] = max(min(logits[a], logit_range), -logit_range)
+
+        # Cleanup
+        self.accumulated.clear()
+        self.action_counts.clear()
+
+================================================================
+agent_grok.py
+================================================================
+"""Grok agent v1"""
+import math
+from src.agents.rl_agent import AgentRL
+
+
+class AgentEquilibrium(AgentRL):
+    """
+    The final evolution.
+    - Max-baseline advantage (the correct one)
+    - Entropy regularization (prevents premature collapse)
+    - Momentum + damping + proper L2 scaling
+    - Immortal actions (never deleted)
+    - Automatic name from filename
+    """
+
+    def _apply_accumulated_updates(self):
+        lr = self.config["learning_rate"]
+        momentum = self.config.get("momentum", 0.9)
+        entropy_beta = self.config.get("entropy_bonus", 0.01)
+        min_logit = -self.config.get("logit_range", 20.0)
+
+        for infoset, reward_dict in list(self.accumulated.items()):
+            if not reward_dict:
+                continue
+
+            # === 1. Average rewards + counts ===
+            counts = self.action_counts.get(infoset, {})
+            avg_rewards = {
+                a: reward_dict[a] / counts[a]
+                for a in reward_dict
+                if counts.get(a, 0) > 0
+            }
+            if not avg_rewards:
+                continue
+
+            # === 2. MAX BASELINE (this is the truth) ===
+            baseline = max(avg_rewards.values())
+            if baseline < 0:
+                baseline = 0.0
+            advantages = {a: r - baseline for a, r in avg_rewards.items()}
+
+            # === 3. Entropy bonus ===
+            logits = self.logits.setdefault(infoset, {})
+            legal = self._get_all_actions(infoset)
+            action_logits = [logits.get(a, 0.0) for a in legal]
+            max_l = max(action_logits)
+            shifted = [l - max_l for l in action_logits]
+            exps = [math.exp(l) for l in shifted]
+            total = sum(exps) or 1.0
+            probs = [e / total for e in exps]
+
+            entropy = -sum(p * math.log(p + 1e-12) for p in probs if p > 0)
+            entropy_bonus = {a: entropy_beta * (math.log(probs[i] + 1e-12) + 1) for i, a in enumerate(legal)}
+
+            # === 4. Final gradient ===
+            grad = {}
+            for a in legal:
+                adv = advantages.get(a, 0.0)
+                ent = entropy_bonus.get(a, 0.0)
+                grad[a] = adv + ent  # ← both terms
+
+            # === 5. L2 normalize + scale ===
+            vec = [grad.get(a, 0.0) for a in legal]
+            norm = math.hypot(*vec) or 1.0
+            scale = lr * math.sqrt(len(legal)) / norm
+            normalized = [g * scale for g in vec]
+
+            # === 6. Momentum + update + clip (never delete) ===
+            velocity = self.update_momentum.setdefault(infoset, {})
+            for a, delta in zip(legal, normalized):
+                if a not in logits:
+                    logits[a] = self.rng.uniform(-0.3, 0.3)
+                v = velocity.get(a, 0.0)
+                velocity[a] = momentum * v + (1 - momentum) * delta
+                logits[a] += velocity[a]
+
+            # Max-normalize + clip
+            if logits:
+                max_l = max(logits.values())
+                for a in list(logits):
+                    logits[a] = max(logits[a] - max_l, min_logit)
+
+        # Clear
+        self.accumulated.clear()
+        self.action_counts.clear()
+
+================================================================
+agent_kimi.py
+================================================================
+"""
+Kimi agent v1
+
+UCB-style bonus + max-baseline policy-gradient update.
+No neural nets – still a pure logit table.
+"""
+import math
+from src.agents.rl_agent import AgentRL
+
+
+class AgentUCB(AgentRL):
+    """
+    Adds an exploration bonus sqrt(ln(total_visits) / action_visits)
+    on top of the vanilla REINFORCE gradient.
+    Uses the same max-baseline as AgentEquilibrium and keeps entropy
+    regularisation to prevent collapse.
+    """
+
+    def _apply_accumulated_updates(self):
+        lr = self.config["learning_rate"]
+        mom = self.config.get("momentum", 0.9)
+        ent_beta = self.config.get("entropy_bonus", 0.01)
+        min_logit = -self.config.get("logit_range", 20.0)
+
+        for infoset, reward_dict in list(self.accumulated.items()):
+            if not reward_dict:
+                continue
+
+            # ---- 1. average reward per action ----
+            counts = self.action_counts.get(infoset, {})
+            avg = {a: reward_dict[a] / counts[a] for a in reward_dict if counts.get(a, 0) > 0}
+            if not avg:
+                continue
+
+            # ---- 2. max baseline ----
+            baseline = max(avg.values()) if max(avg.values()) > 0 else 0.0
+            adv = {a: r - baseline for a, r in avg.items()}
+
+            # ---- 3. UCB bonus ----
+            total_visits = sum(counts.values())
+            ucb = {}
+            for a in avg:
+                n = counts[a]
+                bonus = math.sqrt(math.log(total_visits + 1) / (n + 1e-6))
+                ucb[a] = bonus
+
+            # ---- 4. entropy bonus (same as AgentEquilibrium) ----
+            logits = self.logits.setdefault(infoset, {})
+            legal = sorted(self._get_all_actions(infoset))
+            action_logits = [logits.get(ac, 0.0) for ac in legal]
+            max_l = max(action_logits)
+            probs = self._softmax(action_logits, temp=1.0)
+            entropy = -sum(p * math.log(p + 1e-12) for p in probs if p > 0)
+            ent_bonus = {ac: ent_beta * (math.log(probs[i] + 1e-12) + 1)
+                         for i, ac in enumerate(legal)}
+
+            # ---- 5. final gradient ----
+            grad = {}
+            for ac in legal:
+                g = adv.get(ac, 0.0) + ucb.get(ac, 0.0) + ent_bonus.get(ac, 0.0)
+                grad[ac] = g
+
+            # ---- 6. L2 normalise & scale ----
+            vec = [grad.get(ac, 0.0) for ac in legal]
+            norm = math.hypot(*vec) or 1.0
+            desired = lr * math.sqrt(len(legal))
+            scaled = [g * desired / norm for g in vec]
+
+            # ---- 7. momentum update + clip ----
+            velocity = self.update_momentum.setdefault(infoset, {})
+            for ac, delta in zip(legal, scaled):
+                if ac not in logits:
+                    logits[ac] = self.rng.uniform(-0.3, 0.3)
+                v = velocity.get(ac, 0.0)
+                velocity[ac] = mom * v + (1 - mom) * delta
+                logits[ac] += velocity[ac]
+
+            # max-normalise & hard clip
+            if logits:
+                max_l = max(logits.values())
+                for ac in list(logits):
+                    logits[ac] = max(logits[ac] - max_l, min_logit)
+
+        # ---- 8. clean buffers ----
+        self.accumulated.clear()
+        self.action_counts.clear()
+
+    # helper
+    @staticmethod
+    def _softmax(logits, temp=1.0):
+        max_l = max(logits)
+        exps = [math.exp((l - max_l) / temp) for l in logits]
+        tot = sum(exps)
+        return [e / tot for e in exps]
+
+================================================================
+agent_qwen.py
+================================================================
+"""Qwen agent v2"""
+import math
+from src.agents.rl_agent import AgentRL
+
+
+class AgentAdvanced(AgentRL):
+    """
+    An advanced RL agent for Poker32.
+    Uses max-baseline advantage updates, entropy regularization,
+    and an adaptive learning rate inversely proportional to action counts.
+    """
+    def _apply_accumulated_updates(self):
+        """
+        Applies accumulated rewards using an advantage-based update rule
+        with entropy regularization and an adaptive learning rate based on action counts.
+        """
+        base_lr = self.config["learning_rate"]
+        momentum = self.config.get("momentum", 0.9)
+        entropy_beta = self.config.get("entropy_bonus", 0.01)
+        logit_range = self.config.get("logit_range", 20.0)
+        init_range = self.config.get("init_range", 0.1)
+        temperature = self.config.get("temperature", 1.0)
+
+        for infoset, reward_dict in list(self.accumulated.items()):
+            if not reward_dict:
+                continue
+
+            counts = self.action_counts.get(infoset, {})
+            # Calculate average reward per action for this cycle
+            avg_rewards = {
+                a: reward_dict[a] / counts[a]
+                for a in reward_dict
+                if counts.get(a, 0) > 0
+            }
+            if not avg_rewards:
+                continue
+
+            # 1. Compute advantages using the MAX baseline
+            baseline = max(avg_rewards.values())
+            advantages = {a: r - baseline for a, r in avg_rewards.items()}
+
+            # 2. Calculate current policy entropy and entropy bonus gradient
+            logits = self.logits.setdefault(infoset, {})
+            legal_actions = sorted(list(self._get_all_actions(infoset))) # Sort for consistency
+
+            # Initialize new logits if needed
+            for a in legal_actions:
+                if a not in logits:
+                    logits[a] = self.rng.uniform(-init_range, init_range)
+
+            # Calculate current policy probabilities (pi) using logits and temperature
+            action_logits = [logits.get(a, 0.0) for a in legal_actions]
+            if temperature > 0:
+                temp_scaled_logits = [l / temperature for l in action_logits]
+                max_l = max(temp_scaled_logits)
+                shifted = [l - max_l for l in temp_scaled_logits]
+                exps = [math.exp(l) for l in shifted]
+                total = sum(exps) or 1.0
+                pi = [e / total for e in exps]
+            else: # Deterministic policy if temperature is 0
+                max_idx = action_logits.index(max(action_logits))
+                pi = [0.0] * len(action_logits)
+                pi[max_idx] = 1.0
+
+            # Calculate entropy H = -sum(p * log(p))
+            entropy = -sum(p * math.log(p + 1e-12) for p in pi if p > 0)
+            # Calculate entropy bonus gradient: d/d_logits[ H ] = p * (log(p) + 1)
+            entropy_bonus_grad = {
+                a: entropy_beta * (math.log(pi[i] + 1e-12) + 1) * pi[i]
+                for i, a in enumerate(legal_actions)
+            }
+
+            # 3. Prepare updates for each legal action
+            updates = {}
+            for a in legal_actions:
+                # Advantage might be 0 if action wasn't taken this cycle
+                adv = advantages.get(a, 0.0)
+                ent_bonus = entropy_bonus_grad.get(a, 0.0)
+                combined_grad = adv + ent_bonus
+
+                # 4. Adaptive Learning Rate: scale base_lr by 1 / count(a) for this cycle
+                # This makes frequent actions' logits change less drastically per update.
+                # If an action wasn't taken this cycle (count=0), its update is based only on entropy.
+                action_count = counts.get(a, 0)
+                if action_count > 0:
+                    adaptive_lr = base_lr / action_count
+                    updates[a] = combined_grad * adaptive_lr
+                else:
+                    # Only entropy bonus contributes for actions not taken this cycle
+                    updates[a] = ent_bonus * base_lr # Apply base LR here as no count-based scaling occurred for entropy
+
+            # 5. Apply momentum and update logits
+            velocity = self.update_momentum.setdefault(infoset, {})
+            for a, update_val in updates.items():
+                old_velocity = velocity.get(a, 0.0)
+                # Momentum update: v = momentum * old_v + (1 - momentum) * new_update_val
+                # Note: This is a slight variation from standard momentum where the new gradient is used.
+                # Here, we apply momentum to the already calculated 'update_val'.
+                # Standard momentum for the *value* is: new_val = old_val + v_{t+1}; v_{t+1} = beta * v_t + lr * grad
+                # Our 'update_val' is like 'lr * grad'. So, v_{t+1} = beta * v_t + update_val
+                new_velocity = momentum * old_velocity + update_val
+                velocity[a] = new_velocity
+
+                # Apply the velocity update to the logit
+                logits[a] += new_velocity
+
+            # 6. Apply damping and clipping to logits
+            damping = self.config.get("damping", 0.99)
+            for a in logits:
+                logits[a] = logits[a] * damping
+                logits[a] = max(min(logits[a], logit_range), -logit_range)
+
+        # Clear accumulated rewards and counts for the next cycle
+        self.accumulated.clear()
+        self.action_counts.clear()
+
+================================================================
+rl_agent.py
+================================================================
+"""Base AgentRL class"""
+import random
+import math
+import json
+from pathlib import Path
+from typing import Dict, Any
+from src.agent import Agent, InfosetKey
+from src.utils import round_floats
+
+
+def _serialize_infoset_key(key: InfosetKey) -> str:
+    """Convert (hole, branch) → 'hole|branch'"""
+    return f"{key[0]}|{key[1]}"
+
+
+def _deserialize_infoset_key(s: str) -> InfosetKey:
+    """Convert 'hole|branch' → (hole, branch)"""
+    parts = s.split('|', 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid serialized infoset key: {s}")
+    return (parts[0], parts[1])
+
+
+class AgentRL(Agent):
+    DEFAULT_CONFIG = {
+        "learning_rate": 0.1,
+        "temperature": 1.0,
+        "n_epochs": 5_000,
+        "n_cycles": 50,
+    }
+
+    def __init__(
+        self,
+        rng: random.Random | None = None,
+        config: Dict[str, Any] | None = None,
+        policy_path: str | Path | None = None,
+        name: str | None = None,
+        training: bool = False,
+        verbose: bool = False,
+    ):
+        super().__init__(rng=rng, verbose=verbose)
+        self.config = {**self.DEFAULT_CONFIG, **(config or {})}
+
+        self.logits: Dict[InfosetKey, Dict[str, float]] = {}
+        self.accumulated: Dict[InfosetKey, Dict[str, float]] = {}
+        self.games_played = 0
+        self.cycle_games = 0
+        self.name = name
+        self.training = training
+        self.action_counts: Dict[InfosetKey, Dict[str, int]] = {}
+        self.history: list[tuple[InfosetKey, str, int]] = []
+
+        if policy_path:
+            self.load(policy_path)
+
+    # ------------------------------------------------------------------ #
+    # Action selection
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _get_infoset_key(state: dict) -> InfosetKey:
+        """
+        Convert a subjective game state into a unique infoset identifier.
+        (hole_card, betting_branch)
+        """
+        return state["hole"], state["branch"]
+
+    def _get_policy(self, infoset: InfosetKey, legal_moves: tuple[str, ...]) -> Dict[str, float]:
+        """
+        Compute action probabilities via softmax over logits for a given infoset.
+
+        If temperature is zero, returns a greedy (deterministic) policy.
+        Otherwise, applies softmax with temperature scaling and log-sum-exp
+        for numerical stability. Unseen actions default to logit = 0.
+
+        Parameters
+        ----------
+        infoset : tuple[str, str]
+            The (hole_card, betting_branch) defining the subjective state.
+        legal_moves : tuple[str, ...]
+            Actions allowed by the game rules in this state.
+
+        Returns
+        -------
+        dict[str, float]
+            Probability distribution over legal actions (sums to 1).
+        """
+        temp = self.config.get("temperature", 1.)
+        logits = self.logits.get(infoset, {})
+        action_logits = [logits.get(a, 0.0) for a in legal_moves]
+
+        if temp == 0:  # greedy
+            idx = max(range(len(action_logits)), key=action_logits.__getitem__)
+            policy = {a: 0.0 for a in legal_moves}
+            policy[legal_moves[idx]] = 1.0
+            return policy
+
+        # Softmax with log-sum-exp trick
+        max_logit = max(action_logits)
+        shifted = [x - max_logit for x in action_logits]
+        exps = [math.exp(x / temp) for x in shifted]
+        total = sum(exps)
+        return {a: exp / total for a, exp in zip(legal_moves, exps)}
+
+    def _append_to_history(self, infoset: InfosetKey, action: str, player_id: int):
+        self.history.append((infoset, action, player_id))
+
+    def choose_action(self, state: dict) -> str:
+        infoset = self._get_infoset_key(state)
+        legal = state["legal_moves"]
+        player_id = state["player_id"]
+
+        policy = self._get_policy(infoset, legal)
+
+        # Sample action
+        actions = list(policy.keys())
+        probs = list(policy.values())
+        action = self.rng.choices(actions, weights=probs, k=1)[0]
+
+        # Record for later update
+        self._append_to_history(infoset, action, player_id)
+
+        if self.verbose:
+            print(f"Infoset {infoset} | Policy: { {a: f'{p:.3f}' for a, p in policy.items()} } → {action}")
+
+        return action
+
+    # ------------------------------------------------------------------ #
+    # Learning
+    # ------------------------------------------------------------------ #
+    def _accumulate_reward_from_history(self, state):
+        """Apply rewards from 'history' to 'accumulated'."""
+        lr = self.config["learning_rate"]
+        for i, (infoset, action, player_id) in enumerate(self.history):
+            # Accumulate update: only the taken action gets updated
+            if infoset not in self.accumulated:
+                self.accumulated[infoset] = {}
+
+            position = state["positions"][player_id]
+            reward = state["rewards"][position]
+            r0 = self.accumulated[infoset].get(action, 0)
+            self.accumulated[infoset][action] = r0 + reward
+
+            if infoset not in self.action_counts:
+                self.action_counts[infoset] = {}
+            c0 = self.action_counts[infoset].get(action, 0)
+            self.action_counts[infoset][action] = c0 + 1
+
+    def observe_terminal(self, state: dict):
+        """
+        Learn from the outcome of a completed hand by accumulating policy updates.
+
+        For each action the agent took during the hand (stored in `self.history`),
+        this method accumulates an update proportional to the player's reward:
+            Δlogit = learning_rate * reward
+
+        Updates are **not applied immediately**; they are stored in `self.accumulated`
+        and applied only after every `n_epochs` games (at cycle boundaries) to reduce
+        variance and improve convergence in self-play.
+
+        This method is a no-op if `self.training` is False.
+
+        Parameters
+        ----------
+        state : dict
+            Terminal state containing:
+              - 'rewards': tuple of (p0_reward, p1_reward)
+              - 'position': this agent's player index
+              - other metadata (unused here)
+        """
+
+        # Terminate if training mode is not ON
+        if not self.training:
+            return
+
+        if not self.history:
+            return
+
+        self._accumulate_reward_from_history(state)
+
+        self.history.clear()
+
+        # End of game → count it
+        self.games_played += 1
+        self.cycle_games += 1
+
+        # End of cycle → apply accumulated updates
+        if self.cycle_games >= self.config["n_epochs"]:
+            self._apply_accumulated_updates()
+            self.cycle_games = 0  # reset
+
+    def _get_all_actions(self, infoset: InfosetKey) -> set[str]:
+        """Return all actions ever seen at this infoset from all containers."""
+        return (
+                set(self.logits.get(infoset, {}).keys()) |
+                set(self.accumulated.get(infoset, {}).keys()) |
+                set(self.update_momentum.get(infoset, {}).keys())
+        )
+
+    def _compute_average_rewards(self, infoset: InfosetKey) -> Dict[str, float]:
+        """Return {action: average_reward} for actions seen this cycle."""
+        avg = {}
+        total_samples = 0
+        counts = self.action_counts.get(infoset, {})
+        rewards = self.accumulated.get(infoset, {})
+
+        for action in rewards:
+            count = counts.get(action, 0)
+            if count > 0:
+                avg[action] = rewards[action] / count
+                total_samples += count
+
+        return avg if total_samples > 0 else {}
+
+    def _normalize_and_scale(self, grad_vec: list[float],
+                                n_actions: int,
+                                epsilon=1e-12) -> list[float]:
+        """L2 normalize so ||grad|| = lr * sqrt(n_actions)."""
+        # center
+        baseline = sum(grad_vec) / len(grad_vec)
+        # baseline = max(baseline, 0)
+        v = [g - baseline for g in grad_vec]
+
+        # normalize and scale
+        norm = math.hypot(*v)
+        if norm < epsilon:
+            return [0.0] * len(v)
+        desired = self.config["learning_rate"] * math.sqrt(n_actions)
+        return [g * (desired / norm) for g in v]
+
+    def _apply_momentum_and_update(
+            self,
+            infoset: InfosetKey,
+            actions: list[str],
+            normalized_grad: list[float]
+    ):
+        """Final step: momentum, update logits, max-normalize, clip."""
+        mom = self.config.get("momentum", 0.9)
+        logit_range = self.config.get("logit_range", 10.0)
+        init_range = self.config.get("init_range", 0.1)
+
+        logits = self.logits.setdefault(infoset, {})
+        velocity = self.update_momentum.setdefault(infoset, {})
+
+        for action, ng in zip(actions, normalized_grad):
+            # Lazy random init on first update
+            if action not in logits:
+                logits[action] = self.rng.uniform(- init_range, + init_range)
+
+            # Momentum update
+            v_old = velocity.get(action, 0.0)
+            v_new = mom * v_old + (1.0 - mom) * ng
+            velocity[action] = v_new
+
+            # Apply to logit
+            logits[action] += v_new
+
+        # Cap the logits between '-logit_range' and +'logit_range'.
+        if logits:
+            for a in logits:
+                # Damping effect
+                damping = self.config.get("damping", 0.99)
+                logits[a] *= damping
+
+                # Clipping
+                logits[a] = min(logits[a], logit_range)
+                logits[a] = max(logits[a], -logit_range)
+
+    def _clear_rewards_and_counts(self):
+        """
+        Clear rewards and counts.
+        If momentum is > 0, then apply gradual decay instead.
+        """
+        gamma = self.config.get("momentum", 0.)
+        if gamma <= 0:
+            self.accumulated.clear()
+            self.action_counts.clear()
+        else:
+            self.accumulated = {infoset: {k: v * gamma for k, v in d.items()}
+                                for infoset, d in self.accumulated.items()}
+            self.action_counts = {infoset: {k: v * gamma for k, v in d.items()}
+                                  for infoset, d in self.action_counts.items()}
+
+    def _apply_accumulated_updates(self):
+        """Main update loop — now crystal clear and fully modular."""
+        for infoset in list(self.accumulated.keys()):
+            if infoset not in self.accumulated or not self.accumulated[infoset]:
+                continue
+
+            # Step 1: Compute average reward per action
+            avg_rewards = self._compute_average_rewards(infoset)
+            if not avg_rewards:
+                continue
+
+            # Step 2: Get full action list and build gradient vector
+            actions = sorted(self._get_all_actions(infoset))
+            grad_vec = [avg_rewards.get(a, 0.0) for a in actions]
+
+            # Step 3: L2 normalize + scale by learning rate
+            normalized_grad = self._normalize_and_scale(grad_vec, len(actions))
+            if not any(normalized_grad):
+                continue
+
+            # Step 4: Apply momentum + update logits + max-norm + clip
+            self._apply_momentum_and_update(infoset, actions, normalized_grad)
+
+        # Clean up
+        self._clear_rewards_and_counts()
+
+    # ------------------------------------------------------------------ #
+    # Persistence
+    # ------------------------------------------------------------------ #
+    def save(self, filepath: str | Path, decimals=2):
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert tuple keys to strings
+        serializable_logits = {
+            _serialize_infoset_key(k): round_floats(v, decimals) for k, v in self.logits.items()
+        }
+
+        data = {
+            "logits": serializable_logits,
+            "games_played": self.games_played,
+            "config": round_floats(self.config, decimals),
+        }
+
+        with filepath.open("w") as f:
+            json.dump(data, f, indent=2)
+
+        print(f"Policy saved to {filepath.resolve()}")
+
+    @classmethod
+    def load(cls, filepath: str | Path, **kwargs):
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"Policy file not found: {filepath}")
+
+        with open(filepath, "r") as f:
+            data = json.load(f)
+
+        saved_logits_raw = data["logits"]
+        saved_games_played = data.get("games_played", 0)
+        saved_config = data.get("config", {})
+
+        # Deserialize keys
+        saved_logits = {
+            _deserialize_infoset_key(k): v for k, v in saved_logits_raw.items()
+        }
+
+        final_config = {**saved_config, **kwargs.get("config", {})}
+
+        agent = cls(
+            rng=kwargs.get("rng"),
+            verbose=kwargs.get("verbose", False),
+            config=final_config,
+            policy_path=None,
+            name=kwargs.get("name", None),
+            training=kwargs.get("training", False),
+        )
+
+        agent.logits = saved_logits
+        # Note: update_momentum is not saved in JSON version (optional: add if needed)
+        agent.games_played = saved_games_played
+
+        if "config" in kwargs:
+            agent.config = final_config
+
+        print(f"\nPolicy loaded: {filepath.name}")
+        print(f"  • Trained for {agent.games_played:,} games")
+        print(f"  • Learning rate: {agent.config['learning_rate']}")
+        print(f"  • Training mode: {agent.training}")
+
+        return agent
+
+
+def load_rl_agent(
+    filepath: Path | str,
+    *,
+    rng: random.Random | None = None,
+    verbose: bool = False,
+    training: bool = False,
+) -> AgentRL:
+    """ Load RL agent."""
+    if rng is None:
+        rng = random.Random()
+
+    filepath = Path(filepath)
+    if not filepath.exists():
+        raise FileNotFoundError(f"Model not found: {filepath}")
+
+    with open(filepath, "r") as f:
+        data = json.load(f)
+
+    logits_raw = data["logits"]
+    logits = {_deserialize_infoset_key(k): v for k, v in logits_raw.items()}
+    games_played = data.get("games_played", 0)
+
+    agent = AgentRL(rng=rng, verbose=False, training=training, name=filepath.stem)
+    agent.logits = logits
+    agent.games_played = games_played
+
+    if verbose:
+        if games_played < 10**6:
+            print(f"  Loaded {filepath.name:30} → {games_played / 10**3:.0f}K games")
+        else:
+            print(f"  Loaded {filepath.name:30} → {games_played / 10**6:.1f}M games")
+
+    return agent
+

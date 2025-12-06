@@ -1,17 +1,16 @@
-# scripts/pipelines/pipeline_gto.py
 import random
 from pathlib import Path
 from src.training import training
 from src.utils import inspect_policy
-from src.agents.agent_grok import AgentEquilibrium as AgentGrok
+from src.agents.agent_gemini import AgentMellow as AgentGemini
 
 
 if __name__ == '__main__':
     # ------------------ CONFIGURATION ------------------
 
-    _MODEL_NAME = "grok"
-    _POLICY_PATH = Path(f"../../models/{_MODEL_NAME}.json")
-    _AGENT_CLASS = AgentGrok
+    _MODEL_NAME = "gemini"
+    _POLICY_PATH = Path(f"..\\..\\models\\{_MODEL_NAME}.json")
+    _AGENT_CLASS = AgentGemini
 
     _RNG = random.Random(42)
 

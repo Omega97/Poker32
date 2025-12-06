@@ -1,17 +1,18 @@
-# scripts/pipelines/pipeline_gto.py
+"""
+Train AgentUCB with a long schedule and progressive damping.
+"""
 import random
 from pathlib import Path
-from src.training import training
 from src.utils import inspect_policy
-from src.agents.agent_grok import AgentEquilibrium as AgentGrok
+from src.training import training
+from src.agents.rl_agent import AgentRL
 
 
 if __name__ == '__main__':
     # ------------------ CONFIGURATION ------------------
-
-    _MODEL_NAME = "grok"
-    _POLICY_PATH = Path(f"../../models/{_MODEL_NAME}.json")
-    _AGENT_CLASS = AgentGrok
+    _MODEL_NAME = "agentrl"
+    _POLICY_PATH = Path(f"..\\..\\models\\{_MODEL_NAME}.json")
+    _AGENT_CLASS = AgentRL
 
     _RNG = random.Random(42)
 
