@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from src.poker32 import Poker32
-from src.rl_agent import load_rl_agent
+from src.agents.rl_agent import load_rl_agent
 
 
 def play_match(agent_a, agent_b, n_hands: int, rng:random.Random | None = None):
@@ -36,7 +36,7 @@ def run_tournament(
     rng: random.Random | None = None,
     figsize=(10, 8),
     cmap="RdYlGn",
-    name_length=20,
+    name_length=12,
     save_plot: str | Path | None = "tournament_results.png"
 ):
     """
@@ -67,7 +67,8 @@ def run_tournament(
             name_a, name_b = names[i], names[j]
             agent_a, agent_b = agents[i], agents[j]
 
-            print(f"[{match_count:2d}/{total_matches}] {name_a:{name_length}} vs {name_b:{name_length}} ... ", end="", flush=True)
+            print(f"[{match_count:2d}/{total_matches}] {name_a:{name_length}} vs {name_b:{name_length}} ... ",
+                  end="", flush=True)
 
             rng = random.Random(i * n + j)
             ev_a, ev_b = play_match(agent_a, agent_b, n_hands, rng=rng)
@@ -130,7 +131,7 @@ if __name__ == "__main__":
     # _MODELS_DIR = Path("..") / "models" / "tournament_2025"
 
     _PLOT_PATH = Path("..") / "data" / "tournament_heatmap.png"
-    _N_HAND = 5_000
+    _N_HAND = 4_000
     _RNG = random.Random(0)
     # ---------------------------------------------------
 
