@@ -1,5 +1,5 @@
 from pathlib import Path
-from src.rl_agent import AgentRL
+from src.agents.rl_agent import AgentRL
 from src.poker32 import Poker32
 from src.utils import inspect_policy
 
@@ -37,7 +37,7 @@ def test_training(file_path=_POLICY_PATH):
     # Training loop
     for cycle in range(config["n_cycles"]):
         for _ in range(config["n_epochs"]):
-            game.play((agent, agent), verbose=False)
+            game.play((agent, agent))
 
         print(f"\rCycle {cycle+1}/{config['n_cycles']} | "
               f"Games played: {agent.games_played:,}", end='')
