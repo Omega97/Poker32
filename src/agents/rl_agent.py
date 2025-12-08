@@ -1,4 +1,7 @@
-"""Base AgentRL class"""
+"""
+src/agents/rl_agent.py
+Base AgentRL class
+"""
 import random
 import math
 import json
@@ -18,10 +21,13 @@ def _deserialize_infoset_key(s: str) -> InfosetKey:
     parts = s.split('|', 1)
     if len(parts) != 2:
         raise ValueError(f"Invalid serialized infoset key: {s}")
-    return (parts[0], parts[1])
+    return parts[0], parts[1]
 
 
 class AgentRL(Agent):
+    """
+    Explicit policy for every decision-point of the game.
+    """
     DEFAULT_CONFIG = {
         "learning_rate": 0.1,
         "temperature": 1.0,
@@ -30,13 +36,13 @@ class AgentRL(Agent):
     }
 
     def __init__(
-        self,
-        rng: random.Random | None = None,
-        config: Dict[str, Any] | None = None,
-        policy_path: str | Path | None = None,
-        name: str | None = None,
-        training: bool = False,
-        verbose: bool = False,
+            self,
+            rng: random.Random | None = None,
+            config: Dict[str, Any] | None = None,
+            policy_path: str | Path | None = None,
+            name: str | None = None,
+            training: bool = False,
+            verbose: bool = False,
     ):
         super().__init__(rng=rng, verbose=verbose)
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
@@ -120,16 +126,16 @@ class AgentRL(Agent):
         self._append_to_history(infoset, action, player_id)
 
         if self.verbose:
-            print(f"Infoset {infoset} | Policy: { {a: f'{p:.3f}' for a, p in policy.items()} } → {action}")
+            dct = {a: f'{p:.3f}' for a, p in policy.items()}
+            print(f"Infoset {infoset} | Policy: {dct} → {action}")
 
         return action
 
     # ------------------------------------------------------------------ #
     # Learning
     # ------------------------------------------------------------------ #
-    def _accumulate_reward_from_history(self, state):
+    def _accumulate_from_history(self, state):
         """Apply rewards from 'history' to 'accumulated'."""
-        lr = self.config["learning_rate"]
         for i, (infoset, action, player_id) in enumerate(self.history):
             # Accumulate update: only the taken action gets updated
             if infoset not in self.accumulated:
@@ -167,15 +173,10 @@ class AgentRL(Agent):
               - 'position': this agent's player index
               - other metadata (unused here)
         """
-
-        # Terminate if training mode is not ON
-        if not self.training:
+        if not self.training or not self.history:
             return
 
-        if not self.history:
-            return
-
-        self._accumulate_reward_from_history(state)
+        self._accumulate_from_history(state)
 
         self.history.clear()
 
@@ -212,8 +213,8 @@ class AgentRL(Agent):
         return avg if total_samples > 0 else {}
 
     def _normalize_and_scale(self, grad_vec: list[float],
-                                n_actions: int,
-                                epsilon=1e-12) -> list[float]:
+                             n_actions: int,
+                             epsilon=1e-12) -> list[float]:
         """L2 normalize so ||grad|| = lr * sqrt(n_actions)."""
         # center
         baseline = sum(grad_vec) / len(grad_vec)
@@ -265,7 +266,7 @@ class AgentRL(Agent):
                 logits[a] = min(logits[a], logit_range)
                 logits[a] = max(logits[a], -logit_range)
 
-    def _clear_rewards_and_counts(self):
+    def _clear_accumulated_and_counts(self):
         """
         Clear rewards and counts.
         If momentum is > 0, then apply gradual decay instead.
@@ -304,7 +305,7 @@ class AgentRL(Agent):
             self._apply_momentum_and_update(infoset, actions, normalized_grad)
 
         # Clean up
-        self._clear_rewards_and_counts()
+        self._clear_accumulated_and_counts()
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -372,13 +373,37 @@ class AgentRL(Agent):
 
         return agent
 
+    def get_maturity(self, k=1.) -> float:
+        """
+        Measures how well a policy converged based on obvious mistakes.
+        """
+        if not self.logits:
+            return 0.
+
+        logits = []
+
+        for (hand_char, history), strategy_dict in self.logits.items():
+
+            if hand_char == "2":
+                if "c" in strategy_dict and "f" in strategy_dict and "R" not in strategy_dict:
+                    logits.append(-strategy_dict["c"])  # <- we want it to be negative
+            # if hand_char == "A":
+            #     if "f" in strategy_dict:
+            #         logits.append(-strategy_dict["f"])  # <- we want it to be negative
+
+        if len(logits):
+            x = sum(logits) / len(logits) * k
+            return math.tanh(max(0., x))
+        else:
+            return 0.
+
 
 def load_rl_agent(
-    filepath: Path | str,
-    *,
-    rng: random.Random | None = None,
-    verbose: bool = False,
-    training: bool = False,
+        filepath: Path | str,
+        *,
+        rng: random.Random | None = None,
+        verbose: bool = False,
+        training: bool = False,
 ) -> AgentRL:
     """ Load RL agent."""
     if rng is None:
@@ -400,9 +425,9 @@ def load_rl_agent(
     agent.games_played = games_played
 
     if verbose:
-        if games_played < 10**6:
-            print(f"  Loaded {filepath.name:30} → {games_played / 10**3:.0f}K games")
+        if games_played < 10 ** 6:
+            print(f"  Loaded {filepath.name:30} → {games_played / 10 ** 3:.0f}K games")
         else:
-            print(f"  Loaded {filepath.name:30} → {games_played / 10**6:.1f}M games")
+            print(f"  Loaded {filepath.name:30} → {games_played / 10 ** 6:.1f}M games")
 
     return agent
