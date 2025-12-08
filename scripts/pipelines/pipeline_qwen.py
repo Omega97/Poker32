@@ -9,37 +9,32 @@ if __name__ == '__main__':
     # ------------------ CONFIGURATION ------------------
 
     _MODEL_NAME = "qwen"
-    _POLICY_PATH = Path(f"..\\..\\models\\{_MODEL_NAME}.json")
     _AGENT_CLASS = AgentQwen
-
+    _POLICY_PATH = Path(f"..\\..\\models\\{_MODEL_NAME}.json")
     _RNG = random.Random(42)
-
-    _CONFIG = {
-        "learning_rate": 0.1,
-        "temperature": 1.0,
-        "init_range": 0.1,
-        "logit_range": 20,
-        "momentum": 0.9,
-        "damping": 0.9,
-        "n_epochs": 10_000,
-        "n_cycles": 200
-    }
+    _CONFIG = {"learning_rate": 0.1,  # step length for each spot
+               "temperature": 1.0,  # modifier for the policy sampling
+               "init_range": 0.1,  # initial range for the logits
+               "logit_range": 20,  # logits are capped between +/- this value
+               "momentum": 0.7,  # decay on accumulated rewards and counts
+               "damping": 0.7,  # attract the logits towards zero
+               "n_epochs": 5_000,  # number of hands per cycle
+               "n_cycles": 100}  # number of updates
 
     # ---------- safety check ----------
-    if _POLICY_PATH.exists():
-        input(f"Warning: {_POLICY_PATH.name} already exists. Continue?")
+    if _POLICY_PATH.exists() and _POLICY_PATH.stat().st_size:
+        ans = input(f"{_POLICY_PATH.name} already exists – overwrite?")
+    else:
+        print(f'Training "{_MODEL_NAME}" ({_POLICY_PATH})')
 
     # ---------------- TRAINING PIPELINE ----------------
 
-    # Phase 1: exploration
-    training(_AGENT_CLASS, _POLICY_PATH, _CONFIG, _RNG)
-
-    # Phase 2: more stable refinement
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    _CONFIG["damping"] = 0.9
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
     _CONFIG["damping"] = 0.99
-    _CONFIG["momentum"] = 0.99
-    training(_AGENT_CLASS, _POLICY_PATH, _CONFIG, _RNG)
+    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
 
-    # ------------------- INSPECTION --------------------
+    # --------------- INSPECT THE RESULTS ---------------
 
-    print("\n=== TRAINING COMPLETE ===\n")
-    inspect_policy(_POLICY_PATH, show_proba=True)
+    inspect_policy(file_path=_POLICY_PATH, show_proba=True)
