@@ -1,4 +1,4 @@
-"""ChatGPT agent v1"""
+"""ChatGPT agent v2"""
 import math
 from src.agents.rl_agent import AgentRL
 from src.poker32 import RANK_TO_IDX, N_RANKS
