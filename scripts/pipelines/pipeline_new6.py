@@ -27,7 +27,7 @@ if __name__ == '__main__':
                "logit_range": 20,  # logits are capped between +/- this value
                "momentum": 0.8,  # decay on accumulated rewards and counts
                "damping": 0.5,  # on logits
-               "n_epochs": 5_000,  # number of hands per cycle
+               "batch_size": 5_000,  # number of hands per cycle
                "n_cycles": 50}  # number of updates
 
     # ---------------- TRAINING PIPELINE ----------------

@@ -2044,7 +2044,7 @@
   "config": {
     "learning_rate": 0.1,
     "temperature": 1.0,
-    "n_epochs": 5000,
+    "batch_size": 5000,
     "n_cycles": 100,
     "momentum": 0.99,
     "logit_range": 20,

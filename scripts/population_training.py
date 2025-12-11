@@ -12,8 +12,8 @@ class PopulationTrainer:
         "momentum": 0.9,
         "logit_range": 10.0,
         "init_range": 0.2,
-        "n_epochs": 1,
-        "n_cycles": 1,
+        "batch_size": 10,
+        "n_cycles": 10,
     }
 
     def __init__(

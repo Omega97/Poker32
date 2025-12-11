@@ -1,6 +1,7 @@
 import json
 import math
 from pathlib import Path
+from typing import Dict
 from src.poker32 import GAME_MOVES, RANKS
 
 
@@ -81,3 +82,13 @@ def round_floats(obj, decimals=3):
         return [round_floats(item, decimals) for item in obj]
     else:
         return obj
+
+
+def softmax(legal_moves: tuple[str, ...], action_logits) -> Dict[str, float]:
+    # Softmax with log-sum-exp trick
+    max_logit = max(action_logits)
+    shifted = [x - max_logit for x in action_logits]
+    exps = [math.exp(x) for x in shifted]
+    total = sum(exps)
+    policy = {a: exp / total for a, exp in zip(legal_moves, exps)}
+    return policy

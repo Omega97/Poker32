@@ -638,7 +638,7 @@ class AgentRL(Agent):
     DEFAULT_CONFIG = {
         "learning_rate": 0.1,
         "temperature": 1.0,
-        "n_epochs": 5_000,
+        "batch_size": 5_000,
         "n_cycles": 50,
     }
 
@@ -767,7 +767,7 @@ class AgentRL(Agent):
             Δlogit = learning_rate * reward
 
         Updates are **not applied immediately**; they are stored in `self.accumulated`
-        and applied only after every `n_epochs` games (at cycle boundaries) to reduce
+        and applied only after every `batch_size` games (at cycle boundaries) to reduce
         variance and improve convergence in self-play.
 
         This method is a no-op if `self.training` is False.
@@ -797,7 +797,7 @@ class AgentRL(Agent):
         self.cycle_games += 1
 
         # End of cycle → apply accumulated updates
-        if self.cycle_games >= self.config["n_epochs"]:
+        if self.cycle_games >= self.config["batch_size"]:
             self._apply_accumulated_updates()
             self.cycle_games = 0  # reset
 

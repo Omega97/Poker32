@@ -27,13 +27,13 @@ if __name__ == '__main__':
                "logit_range": 20,  # logits are capped between +/- this value
                "momentum": 0.8,  # decay on accumulated rewards and counts
                "damping": 0.5,  # on logits
-               "n_epochs": 10_000,  # number of hands per cycle
+               "batch_size": 10_000,  # number of hands per cycle
                "n_cycles": 100}  # number of updates
 
     # ---------------- TRAINING PIPELINE ----------------
 
     training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
-    _CONFIG["n_epochs"] = 5_000
+    _CONFIG["batch_size"] = 5_000
     _CONFIG["n_cycles"] = 50
     _CONFIG["damping"] = 0.9
     training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)

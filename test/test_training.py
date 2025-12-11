@@ -16,7 +16,7 @@ def test_training(file_path=_POLICY_PATH):
         "temperature": 1.0,
         "logit_range": 10,
         "momentum": 0.9,
-        "n_epochs": 20_000,
+        "batch_size": 20_000,
         "n_cycles": 300,
     }
 
@@ -32,11 +32,11 @@ def test_training(file_path=_POLICY_PATH):
     # Game instance
     game = Poker32()
     print("Starting Poker32 RL training (additive logit, T=1.0)")
-    print(f"Target: {config['n_epochs'] * config['n_cycles']:,} games\n")
+    print(f"Target: {config['batch_size'] * config['n_cycles']:,} games\n")
 
     # Training loop
     for cycle in range(config["n_cycles"]):
-        for _ in range(config["n_epochs"]):
+        for _ in range(config["batch_size"]):
             game.play((agent, agent))
 
         print(f"\rCycle {cycle+1}/{config['n_cycles']} | "

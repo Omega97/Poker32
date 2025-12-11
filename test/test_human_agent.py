@@ -34,7 +34,7 @@ def main(agent_path, log_path, seed:int | None = 42):
 
 if __name__ == '__main__':
     # ------------------ CONFIGURATION ------------------
-    _AGENT_NAME = "v2"
+    _AGENT_NAME = "agentrl_v2"
     _AGENT_PATH = f"..\\models\\{_AGENT_NAME}.json"
     _LOG_PATH = "..\\data\\hero.json"
     _SEED = None

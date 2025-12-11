@@ -28,15 +28,17 @@ def training(agent_class,
     # Game instance
     game = Poker32(rng=rng)
     print("Starting Poker32 RL training (additive logit, T=1.0)")
-    print(f"Target: {config['n_epochs'] * config['n_cycles']:,} games\n")
+    print(f"Target: {config['batch_size'] * config['n_cycles']:,} games\n")
 
     # Training loop
     for cycle in range(config["n_cycles"]):
-        for _ in range(config["n_epochs"]):
+        for _ in range(config["batch_size"]):
             game.play((agent, agent))
 
+        maturity = agent.get_maturity()
         print(f"\rCycle {cycle+1}/{config['n_cycles']} | "
-              f"Games played: {agent.games_played:,}", end='')
+              f"Games played: {agent.games_played:,} | "
+              f"mat={maturity:.2%}", end='')
 
     print()
     agent.save(file_path)
