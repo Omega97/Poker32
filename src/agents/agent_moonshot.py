@@ -153,15 +153,20 @@ class AgentCRM(AgentRL):
     def _apply_accumulated_updates(self):
         """Merge batch into main tables with CFR+ clamping."""
         floor = self.config["regret_floor"]
+
+        # Add regret to cumulative_regret
         for infoset in self.batch_regret:
             for action, r in self.batch_regret[infoset].items():
                 self.cumulative_regret[infoset][action] += r
                 # CFR+
                 if self.cumulative_regret[infoset][action] < floor:
                     self.cumulative_regret[infoset][action] = floor
+
+        # Update cumulative_strategy
         for infoset in self.batch_strategy:
             for action, s in self.batch_strategy[infoset].items():
                 self.cumulative_strategy[infoset][action] += s
+                # input(f"{self.cumulative_strategy[infoset][action]} {s}")
 
         # reset batch
         self.batch_regret.clear()

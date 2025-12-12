@@ -1,7 +1,7 @@
 import random
 from pathlib import Path
-from src.training import training
-from src.utils import inspect_policy
+from src.training import Poker32Trainer
+from src.utils import inspect_policy, safety_check
 from src.agents.agent_moonshot import AgentCRM as AgentMoonshot
 
 
@@ -37,16 +37,10 @@ if __name__ == '__main__':
 
     }
 
-    # ---------- safety check ----------
-    if _POLICY_PATH.exists() and _POLICY_PATH.stat().st_size:
-        ans = input(f"{_POLICY_PATH.name} already exists – continue?")
-    else:
-        print(f'Training "{_MODEL_NAME}" ({_POLICY_PATH})')
-
     # ---------------- TRAINING PIPELINE ----------------
-    training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
-    # _CONFIG['learning_rate'] /= 10
-    # training(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    safety_check(_POLICY_PATH, _MODEL_NAME)
+    trainer = Poker32Trainer(agent_class=_AGENT_CLASS, file_path=_POLICY_PATH, config=_CONFIG, rng=_RNG)
+    trainer.run()
 
     # --------------- INSPECT THE RESULTS ---------------
 

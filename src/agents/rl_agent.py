@@ -1,15 +1,17 @@
 """
 src/agents/rl_agent.py
 Base AgentRL class
-"""
+
 # todo make perfectly deterministic
+# todo remove serialization
+"""
 import random
 import math
 import json
 from pathlib import Path
 from typing import Dict, Any
 from src.agent import Agent, InfosetKey
-from src.utils import round_floats, softmax
+from src.utils import round_floats, softmax, maturity
 
 
 def _serialize_infoset_key(key: InfosetKey) -> str:
@@ -74,6 +76,13 @@ class AgentRL(Agent):
     # ------------------------------------------------------------------ #
     # Policy
     # ------------------------------------------------------------------ #
+    def get_logits(self, infoset: InfosetKey) -> Dict:
+        """
+        Get the logits dict for a given infoset.
+        Creates and stores a new dict if not present.
+        """
+        return self.logits.setdefault(infoset, {})
+
     def get_policy(self,
                    infoset: InfosetKey,
                    legal_moves: tuple[str, ...]) -> Dict[str, float]:
@@ -94,14 +103,14 @@ class AgentRL(Agent):
         dict[str, float]
             Probability distribution over legal actions (sums to 1).
         """
-        logits = self.logits.get(infoset, {})
+        logits = self.get_logits(infoset)
         action_logits = [logits.get(a, 0.) for a in legal_moves]
         return softmax(legal_moves, action_logits)
 
     def _get_all_actions(self, infoset: InfosetKey) -> set[str]:
         """Return all actions ever seen at this infoset from all containers."""
         return (
-                set(self.logits.get(infoset, {}).keys()) |
+                set(self.get_logits(infoset).keys()) |
                 set(self.accumulated.get(infoset, {}).keys()) |
                 set(self.update_momentum.get(infoset, {}).keys())
         )
@@ -114,9 +123,7 @@ class AgentRL(Agent):
             return 0.
 
         logits = []
-
         for (hand_char, history), strategy_dict in self.logits.items():
-
             if hand_char == "2":
                 if "c" in strategy_dict and "f" in strategy_dict and "R" not in strategy_dict:
                     logits.append(-strategy_dict["c"])  # <- we want it to be negative
@@ -124,13 +131,7 @@ class AgentRL(Agent):
                 if "f" in strategy_dict:
                     logits.append(-strategy_dict["f"])  # <- we want it to be negative
 
-        if len(logits):
-            n_worst = len(logits) // 2
-            logits = sorted(logits)[:n_worst]
-            x = sum(logits) / len(logits)
-            return math.tanh(max(0., x))
-        else:
-            return 0.
+        return maturity(logits)
 
     def _append_to_history(self, infoset: InfosetKey, action: str, player_id: int):
         """Append state info to history."""
@@ -273,7 +274,9 @@ class AgentRL(Agent):
             actions: list[str],
             normalized_grad: list[float]
     ):
-        """Final step: momentum, update logits, max-normalize, clip."""
+        """
+        Final step: momentum, update logits, max-normalize, clip.
+        """
         mom = self.config.get("momentum", 0.9)
         logit_range = self.config.get("logit_range", 10.0)
         init_range = self.config.get("init_range", 0.1)
@@ -324,7 +327,6 @@ class AgentRL(Agent):
         """
         Update logits based on the average accumulated update.
         """
-
         # Sort for repeatability
         infosets = sorted(list(self.accumulated.keys()))
 

@@ -96,3 +96,21 @@ def softmax(legal_moves: tuple[str, ...], action_logits) -> Dict[str, float]:
 
 def relu(x):
     return max(0., x)
+
+
+def maturity(logits):
+    """Value in [0, 1], indicates how saturated are the smallest numbers in the list."""
+    if len(logits):
+        n_worst = len(logits) // 2
+        logits = sorted(logits)[:n_worst]
+        x = sum(logits) / len(logits)
+        return math.tanh(max(0., x))
+    else:
+        return 0.
+
+
+def safety_check(policy_path: Path, model_name: str):
+    if policy_path.exists() and policy_path.stat().st_size:
+        input(f"{policy_path.name} already exists – proceed anyway?")
+    else:
+        print(f'Training "{model_name}" ({policy_path})')
