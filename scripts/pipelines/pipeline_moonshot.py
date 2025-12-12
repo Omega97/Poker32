@@ -12,16 +12,30 @@ if __name__ == '__main__':
     _AGENT_CLASS = AgentMoonshot
 
     _RNG = random.Random(42)
-    _CONFIG = {"learning_rate": 0.05,  # step length for each spot
-               "init_range": 0.1,  # initial range for the logits
-               "exploration": 0.1,  # Initial epsilon
-               "min_exploration": 0.05,  # Floor for epsilon
-               "decay": 0.999,  # Epsilon decay per hand
-               "on_policy_cap": 0.20,
-               "use_cfr_plus": True,
-               "logit_range": 20,  # logits are capped between +/- this value
-               "n_epochs": 10_000,  # number of hands per cycle
-               "n_cycles": 300}  # number of updates
+    _CONFIG = {
+        # --- CFR core -------------------------------------------------------
+        "batch_size": 5_000,  # hands between regret dumps (larger → less variance, slower convergence)
+        "n_cycles": 100,
+        "regret_floor": 0.0,  # CFR+: clip negative regrets → 0 (keep 0.0)
+        "p_cap": 2e-4,  # Pluribus reach-probability cap (1e-4–5e-4 works)
+
+        # --- exploration ----------------------------------------------------
+        "exploration": 0.05,  # ε-greedy while acting (0.05 → ≈ exploitative but still exploring)
+        "exploration_decay": 0.999,  # per-hand multiplier (optional, see below)
+
+        # --- averaging ------------------------------------------------------
+        "avg_start": 40_000,  # start adding to average strategy after this many *hands*
+        "avg_decay": 0.999,  # Robbins-Monro style weight on new iterates (optional)
+
+        # --- numerics -------------------------------------------------------
+        "regret_clip": 1e-12,  # ignore regrets whose |raw| < clip (speed, no ELO change)
+        "strategy_clip": 1e-6,  # drop actions with prob < clip when saving (keeps files small)
+
+        # --- diagnostics ----------------------------------------------------
+        "checkpoint_every": 100_000,  # hands between serialisations
+        "eval_every": 50_000,  # hands between exploitability check (if you have a solver)
+
+    }
 
     # ---------- safety check ----------
     if _POLICY_PATH.exists() and _POLICY_PATH.stat().st_size:

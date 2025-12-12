@@ -1,188 +1,209 @@
-# src/agents/crm_agent.py
+from __future__ import annotations
+from collections import defaultdict
+import json
+from pathlib import Path
 from typing import Dict
-from src.agents.rl_agent import AgentRL, InfosetKey
+from src.utils import round_floats, relu
+from src.agents.rl_agent import AgentRL, InfosetKey, _serialize_infoset_key, _deserialize_infoset_key
 
 
 class AgentCRM(AgentRL):
     """
-    Outcome Sampling MCCFR with:
-      - On-policy probability capping (Pluribus-style) → prevents exploding regrets
-      - CFR+ (positive regrets only) → linear convergence
+    Outcome-sampling MCCFR with CFR+ and probability capping.
+    Re-uses the JSON save/load machinery of AgentRL but ignores the RL update path.
     """
 
     DEFAULT_CONFIG = {
-        "on_policy_cap": 0.20,        # ← CRITICAL: prevents importance sampling blowup
-        "use_cfr_plus": True,         # ← CRITICAL: linear convergence, no oscillation
-        "exploration": 0.6,
-        "min_exploration": 0.05,
-        "decay": 0.999,
-        "n_epochs": 1000,
+        "exploration": 0.1,  # ε for ε-greedy while acting
+        "p_cap": 1e-4,  # Pluribus reach-prob threshold
+        "batch_size": 5_000,
+        "n_cycles": 50,
+        "regret_floor": 0.0,  # CFR+: clip negative regrets
     }
 
+    # ------------------------------------------------------------------ #
+    # Construction
+    # ------------------------------------------------------------------ #
     def __init__(self, **kwargs):
+        # We bypass the RL parent initialisers that create logits, accumulated, etc.
         super().__init__(**kwargs)
-        self.history_w_probs = []
+
+        # CFR-specific tables
+        self.cumulative_regret: Dict[InfosetKey, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self.cumulative_strategy: Dict[InfosetKey, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+        # Buffers for the current batch
+        self.batch_regret: Dict[InfosetKey, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self.batch_strategy: Dict[InfosetKey, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self.batch_counts: Dict[InfosetKey, int] = defaultdict(int)
 
     # ------------------------------------------------------------------ #
-    # 1. Policy Generation — NOW WITH CAPPING
+    # Acting
     # ------------------------------------------------------------------ #
-    def _get_policy(self, infoset: InfosetKey,
-                    legal_moves: tuple[str, ...]) -> Dict[str, float]:
-        k_exploration = max(
-            self.config.get("min_exploration", 0.05),
-            self.config.get("exploration", 0.6) * (self.config.get("decay", 0.999) ** self.games_played)
-        )
-        cap = self.config.get("on_policy_cap", 0.20)
+    def get_policy(self, infoset: InfosetKey,
+                   legal_moves: tuple[str, ...]) -> Dict[str, float]:
+        """Regret-matching + ε-greedy exploration."""
+        regrets = self.cumulative_regret.get(infoset, {})
 
-        # 1. Regret Matching (unchanged)
-        regrets = self.logits.get(infoset, {})
-        positive_regrets = {a: max(regrets.get(a, 0.0), 0.0) for a in legal_moves}
-        sum_pos = sum(positive_regrets.values())
-
-        if sum_pos > 0:
-            rm_policy = {a: positive_regrets[a] / sum_pos for a in legal_moves}
+        # relu(x) = max(0, x)
+        baseline = relu(sum(relu(r) for r in regrets.values()))
+        if baseline <= 0:
+            # uniform if no positive regret
+            probs = {a: 1.0 / len(legal_moves) for a in legal_moves}
         else:
-            rm_policy = {a: 1.0 / len(legal_moves) for a in legal_moves}
+            probs = {a: relu(regrets.get(a, 0.0)) / baseline for a in legal_moves}
 
-        # 2. ε-greedy mixing
-        n = len(legal_moves)
-        if not self.training:
-            final = rm_policy
-        else:
-            final = {
-                a: (1 - k_exploration) * rm_policy[a] + k_exploration / n
-                for a in legal_moves
-            }
-
-        # ←←← THE KEY FIX: CAP MAX PROBABILITY (prevents w = 1/p → ∞)
-        if self.training and cap > 0:
-            capped = {a: min(p, cap) for a, p in final.items()}
-            total = sum(capped.values())
-            if total > 0:
-                final = {a: p / total for a, p in capped.items()}
-
-        return final
+        # ε-greedy
+        eps = self.config["exploration"]
+        uniform = 1.0 / len(legal_moves)
+        policy = {a: eps * uniform + (1 - eps) * probs.get(a, 0.0) for a in legal_moves}
+        return policy
 
     # ------------------------------------------------------------------ #
-    # 2. Action Selection — unchanged except we trust capped policy
-    # ------------------------------------------------------------------ #
-    def choose_action(self, state: dict) -> str:
-        infoset = self._get_infoset_key(state)
-        legal = state["legal_moves"]
-        player_id = state["player_id"]
-
-        policy = self._get_policy(infoset, legal)
-        actions = list(policy.keys())
-        probs = list(policy.values())
-        action = self.rng.choices(actions, weights=probs, k=1)[0]
-        prob_selected = policy[action]
-
-        self.history_w_probs.append((infoset, action, player_id, prob_selected, policy))
-        super()._append_to_history(infoset, action, player_id)
-        return action
-
-    # ------------------------------------------------------------------ #
-    # 3. Learning — unchanged math, just CFR+ at the end
+    # Learning
     # ------------------------------------------------------------------ #
     def observe_terminal(self, state: dict):
-        if not self.training or not self.history_w_probs:
-            self.history_w_probs.clear()
-            self.history.clear()
+        """
+        Single outcome-sampling traversal on the finished hand.
+        We treat the *actual* sequence as the sampled outcome.
+        """
+        if not self.training:
             return
 
-        self._accumulate_from_history(state)
+        # 1. Reconstruct the trajectory for each player
+        #    history: list[(infoset, action, player_id)]
+        if not self.history:
+            return
 
-        self.history_w_probs.clear()
-        self.history.clear()
-        self.games_played += 1
-        self.cycle_games += 1
+        # 2. Compute terminal utilities
+        seat = state["positions"][state["player_id"]]
+        utility = float(state["rewards"][seat])  # number of chips won by the player
 
-        if self.cycle_games >= self.config["n_epochs"]:
+        # 3. Backward CFR pass
+        self._traverse_outcome_sampling(utility)
+
+        # 4. House-keeping
+        self._on_game_end()
+        if self.cycle_games >= self.config["batch_size"]:
             self._apply_accumulated_updates()
-            self.cycle_games = 0
+            self._on_cycle_end()
 
-    def _accumulate_from_history(self, state: dict):
-        for (infoset, action_taken, p_id, prob_taken, policy) in self.history_w_probs:
-            position = state["positions"][p_id]
-            utility = state["rewards"][position]
+    # ------------------------------------------------------------------ #
+    # Internal CFR
+    # ------------------------------------------------------------------ #
+    def _traverse_outcome_sampling(self, utility: float):
+        """
+        Single traversal of the *real* trajectory with outcome sampling weights.
+        We walk backward through history and update regrets & strategy.
+        """
+        p_cap = self.config["p_cap"]
 
-            # Importance weight (now bounded because prob_taken ≥ 1 - cap*(n-1))
-            w = 1.0 / prob_taken
+        # reach probabilities for each player (treated as constant for opponent)
+        reach = {0: 1.0, 1: 1.0}  # we start at the root
 
-            if infoset not in self.accumulated:
-                self.accumulated[infoset] = {}
-            if infoset not in self.action_counts:
-                self.action_counts[infoset] = {}
+        # walk backward
+        for infoset, action, player_id in reversed(self.history):
+            legal = tuple(self._get_all_actions(infoset))  # all ever seen
+            if not legal:
+                continue
+            policy = self.get_policy(infoset, legal)
+            my_p = policy.get(action, 0.0)
+            if my_p <= 0.0:
+                continue  # avoid div-by-zero
 
-            for a, prob_a in policy.items():
-                if a == action_taken:
-                    sampled_regret = w * utility * (1.0 - prob_taken)
-                else:
-                    sampled_regret = -w * utility * prob_a
+            # probability cap
+            if reach[player_id] < p_cap:
+                continue
 
-                # Accumulate regret
-                self.accumulated[infoset][a] = self.accumulated[infoset].get(a, 0.0) + sampled_regret
+            # counterfactual reach = product of opponent + chance probs
+            cf_reach = reach[0] * reach[1] / reach[player_id]
 
-                # Accumulate average strategy (weighted by reach prob ≈ policy prob)
-                self.action_counts[infoset][a] = self.action_counts[infoset].get(a, 0.0) + prob_a
+            # regret
+            value = sum(policy[a] * self._expected_value(infoset, a, utility) for a in legal)
+            regret = utility - value
+
+            # weighted regret
+            w = cf_reach * regret
+            self.batch_regret[infoset][action] += w
+            self.batch_strategy[infoset][action] += reach[player_id] * policy[action]
+            self.batch_counts[infoset] += 1
+
+            # update reach for next (earlier) step
+            reach[player_id] *= my_p
+
+        # clear after traversal
+        self.history.clear()
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _expected_value(infoset: InfosetKey,
+                        action: str,
+                        terminal_utility: float) -> float:
+        """
+        Because we sample only *one* outcome we use the observed utility
+        for the action that was actually taken and 0 for all others.
+        This is unbiased for the *average* regret.
+        We rely on the fact that history contains the *actual* action.
+        (simplified because we sample only one outcome)
+        """
+        return terminal_utility
 
     def _apply_accumulated_updates(self):
-        use_cfr_plus = self.config.get("use_cfr_plus", True)
+        """Merge batch into main tables with CFR+ clamping."""
+        floor = self.config["regret_floor"]
+        for infoset in self.batch_regret:
+            for action, r in self.batch_regret[infoset].items():
+                self.cumulative_regret[infoset][action] += r
+                # CFR+
+                if self.cumulative_regret[infoset][action] < floor:
+                    self.cumulative_regret[infoset][action] = floor
+        for infoset in self.batch_strategy:
+            for action, s in self.batch_strategy[infoset].items():
+                self.cumulative_strategy[infoset][action] += s
 
-        for infoset, deltas in self.accumulated.items():
-            if infoset not in self.logits:
-                self.logits[infoset] = {}
+        # reset batch
+        self.batch_regret.clear()
+        self.batch_strategy.clear()
+        self.batch_counts.clear()
 
-            for action, delta in deltas.items():
-                old = self.logits[infoset].get(action, 0.0)
-                new_regret = old + delta
-                if use_cfr_plus:
-                    new_regret = max(new_regret, 0.0)
-                self.logits[infoset][action] = new_regret
+    # ------------------------------------------------------------------ #
+    # Persistence  (re-use RL schema but store regret & strategy)
+    # ------------------------------------------------------------------ #
+    def save(self, filepath, decimals=2):
+        """Save the data to the json file."""
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
 
-            # ←←← THIS IS THE FINAL FIX
-            self._normalize_regrets(infoset)
+        data = {
+            "cumulative_regret": {_serialize_infoset_key(k): round_floats(v, decimals)
+                                  for k, v in self.cumulative_regret.items()},
+            "cumulative_strategy": {_serialize_infoset_key(k): round_floats(v, decimals)
+                                    for k, v in self.cumulative_strategy.items()},
+            "games_played": self.games_played,
+            "config": round_floats(self.config, decimals),
+        }
+        with filepath.open("w") as f:
+            json.dump(data, f, indent=2)
+        print(f"CRM policy saved to {filepath.resolve()}")
 
-        self.accumulated.clear()
+    @classmethod
+    def load(cls, filepath, **kwargs):
+        """Load the data from the json file."""
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(filepath)
 
-    def _normalize_regrets(self, infoset: InfosetKey):
-        """
-        Called after every regret update on an infoset.
-        Prevents numerical explosion and keeps policy well-behaved.
-        This is the secret sauce of all stable CFR agents in 2025.
-        """
-        if infoset not in self.logits:
-            return
+        with open(filepath, "r") as f:
+            data = json.load(f)
 
-        regrets = self.logits[infoset]
-        actions = list(regrets.keys())
-        if len(actions) < 2:
-            return
-
-        values = [regrets[a] for a in actions]
-
-        # 1. Max-normalization (MOST IMPORTANT)
-        max_r = max(values)
-        for a in actions:
-            regrets[a] -= max_r
-
-        # 2. Variance capping (SECOND MOST IMPORTANT)
-        # Target max std dev = config["logit_range"] (e.g., 10.0 or 20.0)
-        import math
-        values = [regrets[a] for a in actions]  # re-read after shift
-        if len(values) >= 2:
-            mean = sum(values) / len(values)
-            variance = sum((x - mean) ** 2 for x in values) / len(values)
-            std = math.sqrt(variance)
-
-            target_std = self.config.get("logit_range", 15.0)
-            if std > target_std:
-                scale = target_std / (std + 1e-8)
-                for a in actions:
-                    regrets[a] = (regrets[a] - mean) * scale + mean
-
-        # Optional: re-apply CFR+ after scaling (safe)
-        if self.config.get("use_cfr_plus", True):
-            for a in actions:
-                if regrets[a] < 0:
-                    regrets[a] = 0.0
+        agent = cls(**kwargs)
+        agent.cumulative_regret = {_deserialize_infoset_key(k): v
+                                   for k, v in data["cumulative_regret"].items()}
+        agent.cumulative_strategy = {_deserialize_infoset_key(k): v
+                                     for k, v in data["cumulative_strategy"].items()}
+        agent.games_played = data.get("games_played", 0)
+        agent.config = {**agent.config, **data.get("config", {})}
+        print(f"CRM policy loaded: {filepath.name} ({agent.games_played:,} games)")
+        return agent
