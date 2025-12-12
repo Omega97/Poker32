@@ -310,19 +310,14 @@ class Poker32:
         position = self.get_player_position(player_id)
         return self.get_rewards()[position]
 
-    def play(self, players: List | Tuple):
-        """
-        Play a hand of Poker32 (Fresh deck, button moved by one).
-        """
-        self.reset()
-        self._set_players(players)
-
-        # Let the agents know that the game has started
+    def _pre_game_procedures(self):
+        """Let the agents know that the game has started"""
         for i, player in enumerate(self._get_players()):
             root_info = {'position': self.get_player_position(i)}
             player.observe_root(root_info)
 
-        # Game loop
+    def _main_game_loop(self):
+        """Game loop."""
         while not self.is_game_over():
             player_to_act = self._get_player_to_act()
             legal_moves = self.get_legal_moves()
@@ -350,9 +345,19 @@ class Poker32:
                     move_info=move_info,
                 )
 
-        # Let the agents know about the result
+    def _post_game_procedures(self):
+        """Let the agents know about the result"""
         for player_id, player in enumerate(self._get_players()):
             player.observe_terminal(self._get_leaf_info(player_id))
 
-        # Output game report
+    def play(self, players: List | Tuple):
+        """
+        Play a hand of Poker32 (Fresh deck, button moved by one).
+        Output game report.
+        """
+        self.reset()
+        self._set_players(players)
+        self._pre_game_procedures()
+        self._main_game_loop()
+        self._post_game_procedures()
         return self._get_report()
