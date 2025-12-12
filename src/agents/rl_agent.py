@@ -2,13 +2,14 @@
 src/agents/rl_agent.py
 Base AgentRL class
 """
+# todo make perfectly deterministic
 import random
 import math
 import json
 from pathlib import Path
 from typing import Dict, Any
 from src.agent import Agent, InfosetKey
-from src.utils import round_floats
+from src.utils import round_floats, softmax
 
 
 def _serialize_infoset_key(key: InfosetKey) -> str:
@@ -30,8 +31,7 @@ class AgentRL(Agent):
     """
     DEFAULT_CONFIG = {
         "learning_rate": 0.1,
-        "temperature": 1.0,
-        "n_epochs": 5_000,
+        "batch_size": 5_000,
         "n_cycles": 50,
     }
 
@@ -55,6 +55,7 @@ class AgentRL(Agent):
         self.training = training
         self.action_counts: Dict[InfosetKey, Dict[str, int]] = {}
         self.history: list[tuple[InfosetKey, str, int]] = []
+        self.update_momentum: Dict[InfosetKey, Dict[str, float]] = {}
 
         if policy_path:
             self.load(policy_path)
@@ -70,12 +71,16 @@ class AgentRL(Agent):
         """
         return state["hole"], state["branch"]
 
-    def _get_policy(self, infoset: InfosetKey, legal_moves: tuple[str, ...]) -> Dict[str, float]:
+    # ------------------------------------------------------------------ #
+    # Policy
+    # ------------------------------------------------------------------ #
+    def get_policy(self,
+                   infoset: InfosetKey,
+                   legal_moves: tuple[str, ...]) -> Dict[str, float]:
         """
         Compute action probabilities via softmax over logits for a given infoset.
 
-        If temperature is zero, returns a greedy (deterministic) policy.
-        Otherwise, applies softmax with temperature scaling and log-sum-exp
+        Otherwise, applies softmax with log-sum-exp
         for numerical stability. Unseen actions default to logit = 0.
 
         Parameters
@@ -84,38 +89,65 @@ class AgentRL(Agent):
             The (hole_card, betting_branch) defining the subjective state.
         legal_moves : tuple[str, ...]
             Actions allowed by the game rules in this state.
-
         Returns
         -------
         dict[str, float]
             Probability distribution over legal actions (sums to 1).
         """
-        temp = self.config.get("temperature", 1.)
         logits = self.logits.get(infoset, {})
-        action_logits = [logits.get(a, 0.0) for a in legal_moves]
+        action_logits = [logits.get(a, 0.) for a in legal_moves]
+        return softmax(legal_moves, action_logits)
 
-        if temp == 0:  # greedy
-            idx = max(range(len(action_logits)), key=action_logits.__getitem__)
-            policy = {a: 0.0 for a in legal_moves}
-            policy[legal_moves[idx]] = 1.0
-            return policy
+    def _get_all_actions(self, infoset: InfosetKey) -> set[str]:
+        """Return all actions ever seen at this infoset from all containers."""
+        return (
+                set(self.logits.get(infoset, {}).keys()) |
+                set(self.accumulated.get(infoset, {}).keys()) |
+                set(self.update_momentum.get(infoset, {}).keys())
+        )
 
-        # Softmax with log-sum-exp trick
-        max_logit = max(action_logits)
-        shifted = [x - max_logit for x in action_logits]
-        exps = [math.exp(x / temp) for x in shifted]
-        total = sum(exps)
-        return {a: exp / total for a, exp in zip(legal_moves, exps)}
+    def get_maturity(self) -> float:
+        """
+        Measures how well a policy converged based on obvious mistakes.
+        """
+        if not self.logits:
+            return 0.
+
+        logits = []
+
+        for (hand_char, history), strategy_dict in self.logits.items():
+
+            if hand_char == "2":
+                if "c" in strategy_dict and "f" in strategy_dict and "R" not in strategy_dict:
+                    logits.append(-strategy_dict["c"])  # <- we want it to be negative
+            elif hand_char == "A":
+                if "f" in strategy_dict:
+                    logits.append(-strategy_dict["f"])  # <- we want it to be negative
+
+        if len(logits):
+            n_worst = len(logits) // 2
+            logits = sorted(logits)[:n_worst]
+            x = sum(logits) / len(logits)
+            return math.tanh(max(0., x))
+        else:
+            return 0.
 
     def _append_to_history(self, infoset: InfosetKey, action: str, player_id: int):
+        """Append state info to history."""
         self.history.append((infoset, action, player_id))
 
+    # ------------------------------------------------------------------ #
+    # Action Selection
+    # ------------------------------------------------------------------ #
     def choose_action(self, state: dict) -> str:
+        """
+        Choose one of the legal actions, according to the policy.
+        Record the choice in the history.
+        """
         infoset = self._get_infoset_key(state)
         legal = state["legal_moves"]
         player_id = state["player_id"]
-
-        policy = self._get_policy(infoset, legal)
+        policy = self.get_policy(infoset, legal)
 
         # Sample action
         actions = list(policy.keys())
@@ -125,17 +157,16 @@ class AgentRL(Agent):
         # Record for later update
         self._append_to_history(infoset, action, player_id)
 
-        if self.verbose:
-            dct = {a: f'{p:.3f}' for a, p in policy.items()}
-            print(f"Infoset {infoset} | Policy: {dct} → {action}")
-
         return action
 
     # ------------------------------------------------------------------ #
     # Learning
     # ------------------------------------------------------------------ #
     def _accumulate_from_history(self, state):
-        """Apply rewards from 'history' to 'accumulated'."""
+        """
+        Scan the history, and apply the reward of this state to
+        the accumulated rewards of the trajectory, then clear the history.
+        """
         for i, (infoset, action, player_id) in enumerate(self.history):
             # Accumulate update: only the taken action gets updated
             if infoset not in self.accumulated:
@@ -151,16 +182,32 @@ class AgentRL(Agent):
             c0 = self.action_counts[infoset].get(action, 0)
             self.action_counts[infoset][action] = c0 + 1
 
+        # Clear the history
+        self.history.clear()
+
+    def _on_game_end(self):
+        """Called after every finished hand."""
+        self.games_played += 1
+        self.cycle_games += 1
+
+    def _on_cycle_end(self):
+        """Called after the accumulated updates have been applied."""
+        self.cycle_games = 0
+
+    # ------------------------------------------------------------------ #
+    # After-game procedures
+    # ------------------------------------------------------------------ #
     def observe_terminal(self, state: dict):
         """
-        Learn from the outcome of a completed hand by accumulating policy updates.
+        After a game ends, learn from the outcome of a completed
+        hand by accumulating policy updates.
 
         For each action the agent took during the hand (stored in `self.history`),
         this method accumulates an update proportional to the player's reward:
             Δlogit = learning_rate * reward
 
         Updates are **not applied immediately**; they are stored in `self.accumulated`
-        and applied only after every `n_epochs` games (at cycle boundaries) to reduce
+        and applied only after every `batch_size` games (at cycle boundaries) to reduce
         variance and improve convergence in self-play.
 
         This method is a no-op if `self.training` is False.
@@ -169,33 +216,26 @@ class AgentRL(Agent):
         ----------
         state : dict
             Terminal state containing:
-              - 'rewards': tuple of (p0_reward, p1_reward)
-              - 'position': this agent's player index
-              - other metadata (unused here)
+              - 'player_id': int (0 or 1)
+              - 'reward': int
+              - 'position': str (BB or SB)
+              - 'positions': dict of int, str; for example: {0: 'BB', 1: 'SB'}
+              - 'names': list of player names,
+              - 'hole_cards': for example: ['A', 'T']
+              - 'branch': for example: 'Qf'
+              - 'rewards': dict of str, int; for example: {'SB': 2, 'BB': -2}
         """
         if not self.training or not self.history:
             return
 
+        # Apply rewards from self.history to self.accumulated
         self._accumulate_from_history(state)
 
-        self.history.clear()
-
-        # End of game → count it
-        self.games_played += 1
-        self.cycle_games += 1
-
-        # End of cycle → apply accumulated updates
-        if self.cycle_games >= self.config["n_epochs"]:
+        # Apply updates at the end of the cycle
+        self._on_game_end()
+        if self.cycle_games >= self.config["batch_size"]:
             self._apply_accumulated_updates()
-            self.cycle_games = 0  # reset
-
-    def _get_all_actions(self, infoset: InfosetKey) -> set[str]:
-        """Return all actions ever seen at this infoset from all containers."""
-        return (
-                set(self.logits.get(infoset, {}).keys()) |
-                set(self.accumulated.get(infoset, {}).keys()) |
-                set(self.update_momentum.get(infoset, {}).keys())
-        )
+            self._on_cycle_end()
 
     def _compute_average_rewards(self, infoset: InfosetKey) -> Dict[str, float]:
         """Return {action: average_reward} for actions seen this cycle."""
@@ -218,7 +258,6 @@ class AgentRL(Agent):
         """L2 normalize so ||grad|| = lr * sqrt(n_actions)."""
         # center
         baseline = sum(grad_vec) / len(grad_vec)
-        # baseline = max(baseline, 0)
         v = [g - baseline for g in grad_vec]
 
         # normalize and scale
@@ -282,8 +321,14 @@ class AgentRL(Agent):
                                   for infoset, d in self.action_counts.items()}
 
     def _apply_accumulated_updates(self):
-        """Main update loop — now crystal clear and fully modular."""
-        for infoset in list(self.accumulated.keys()):
+        """
+        Update logits based on the average accumulated update.
+        """
+
+        # Sort for repeatability
+        infosets = sorted(list(self.accumulated.keys()))
+
+        for infoset in infosets:
             if infoset not in self.accumulated or not self.accumulated[infoset]:
                 continue
 
@@ -373,30 +418,6 @@ class AgentRL(Agent):
 
         return agent
 
-    def get_maturity(self, k=1.) -> float:
-        """
-        Measures how well a policy converged based on obvious mistakes.
-        """
-        if not self.logits:
-            return 0.
-
-        logits = []
-
-        for (hand_char, history), strategy_dict in self.logits.items():
-
-            if hand_char == "2":
-                if "c" in strategy_dict and "f" in strategy_dict and "R" not in strategy_dict:
-                    logits.append(-strategy_dict["c"])  # <- we want it to be negative
-            # if hand_char == "A":
-            #     if "f" in strategy_dict:
-            #         logits.append(-strategy_dict["f"])  # <- we want it to be negative
-
-        if len(logits):
-            x = sum(logits) / len(logits) * k
-            return math.tanh(max(0., x))
-        else:
-            return 0.
-
 
 def load_rl_agent(
         filepath: Path | str,
@@ -409,6 +430,7 @@ def load_rl_agent(
     if rng is None:
         rng = random.Random()
 
+    # Load the data from file
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"Model not found: {filepath}")
@@ -420,6 +442,7 @@ def load_rl_agent(
     logits = {_deserialize_infoset_key(k): v for k, v in logits_raw.items()}
     games_played = data.get("games_played", 0)
 
+    # Create agent instance
     agent = AgentRL(rng=rng, verbose=False, training=training, name=filepath.stem)
     agent.logits = logits
     agent.games_played = games_played
