@@ -84,8 +84,8 @@ def round_floats(obj, decimals=3):
         return obj
 
 
-def softmax(legal_moves: tuple[str, ...], action_logits) -> Dict[str, float]:
-    # Softmax with log-sum-exp trick
+def softmax(legal_moves: tuple[str, ...], action_logits: list) -> Dict[str, float]:
+    """ Softmax with log-sum-exp trick. """
     max_logit = max(action_logits)
     shifted = [x - max_logit for x in action_logits]
     exps = [math.exp(x) for x in shifted]
