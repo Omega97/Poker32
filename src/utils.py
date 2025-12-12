@@ -92,3 +92,7 @@ def softmax(legal_moves: tuple[str, ...], action_logits) -> Dict[str, float]:
     total = sum(exps)
     policy = {a: exp / total for a, exp in zip(legal_moves, exps)}
     return policy
+
+
+def relu(x):
+    return max(0., x)
