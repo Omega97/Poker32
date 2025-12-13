@@ -54,7 +54,7 @@ class Agent:
         knows that the game has begun.
         """
         if self.verbose:
-            print(state)
+            print(f'> "{self.name}" observes {state}')
 
     def observe_terminal(self, state: dict):
         """
@@ -62,7 +62,7 @@ class Agent:
         Default: do nothing (for random or fixed agents).
         """
         if self.verbose:
-            print(state)
+            print(f'> "{self.name}" observes {state}')
 
     def save(self, filepath: str | Path):
         """Optional persistence."""
@@ -76,7 +76,7 @@ class Agent:
         if self.verbose:
             branch = new_state["branch"]
             player_name = move_info["player_name"]
-            print(f'> "{player_name}" played {ACTIONS[move]}  -> "{branch}"')
+            print(f'> "{self.name}": "{player_name}" played {ACTIONS[move]}  -> "{branch}"')
 
 
 class RandomAgent(Agent):
@@ -86,7 +86,7 @@ class RandomAgent(Agent):
         legal = state['legal_moves']
         action = self.rng.choice(list(legal))
         if self.verbose:
-            print(f'{legal} -> {action}')
+            print(f'> "{self.name}": {legal} -> {action}')
         return action
 
 
