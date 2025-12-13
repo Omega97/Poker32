@@ -55,7 +55,8 @@ class Poker32Trainer:
         """Instantiate the game environment."""
         self.game = Poker32(rng=self.rng)
 
-    def _print_training_info(self, config):
+    @staticmethod
+    def _print_training_info(config):
         """Print initial training summary using the effective config."""
         total_games = config['batch_size'] * config['n_cycles']
         print("Starting Poker32 RL training (additive logit, T=1.0)")
@@ -64,7 +65,12 @@ class Poker32Trainer:
     def _training_loop(self, config):
         """Run the main training cycles using the effective config."""
         for cycle in range(config["n_cycles"]):
+
+            # Play games
             self._play_batch(config)
+
+            # Learn from the games
+            self.agent.update_parameters()
 
             maturity = self.agent.get_maturity()
             print(f"\rCycle {cycle+1}/{config['n_cycles']} | "

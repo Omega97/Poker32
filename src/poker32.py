@@ -1,4 +1,5 @@
 # src/poker32.py
+# todo rewards None -> 0 ?
 from __future__ import annotations
 import random
 from typing import Tuple, Dict, List, Optional
@@ -181,9 +182,9 @@ class Poker32:
     def _get_hole_card(self, player_id: int) -> str:
         return self.hole_cards[player_id]
 
-    def _init_hole_cards(self, holes: Optional[List[str]] = None):
-        if holes is not None:
-            self.hole_cards = holes
+    def _init_hole_cards(self, hole_cards: Optional[List[str]] = None):
+        if hole_cards is not None:
+            self.hole_cards = hole_cards
         else:
             self.hole_cards = self.deck[:2]
 
@@ -213,28 +214,33 @@ class Poker32:
                 "branch": self._get_game_branch(),
                 "hole": self._get_hole_card(player_id),
                 "legal_moves": self.get_legal_moves(),
-                "rewards": self.get_rewards()}
+                "positional_rewards": self.get_positional_rewards(),
+                "rewards": self.get_rewards(),
+                }
 
-    def _get_leaf_info(self, player_id: int) -> Dict:
+    def get_leaf_info(self, player_id: int) -> Dict:
         """Info for that player at the end of the game."""
         return {"player_id": player_id,
                 "reward": self.get_player_reward(player_id),
+                "rewards": self.get_rewards(),
                 "position": self.get_player_position(player_id),
                 "positions": self.get_positions(),
+                "position_ids": self.get_position_ids(),
                 "names": self.get_player_names(),
                 "hole_cards": self._get_hole_cards(),
                 "branch": self._get_game_branch(),
-                "rewards": self.get_rewards(),
+                "positional_rewards": self.get_positional_rewards(),
                 }
 
     def _get_report(self) -> Dict:
         """Report with the results of the hand, and info about all players."""
-        return {"names": self.get_player_names(),
+        return {"rewards": self.get_rewards(),
                 "position_ids": self.get_position_ids(),
                 "positions": self.get_positions(),
+                "names": self.get_player_names(),
                 "hole_cards": self._get_hole_cards(),
                 "branch": self._get_game_branch(),
-                "rewards": self.get_rewards(),
+                "positional_rewards": self.get_positional_rewards(),
                 }
 
     # --- public API --------------------------------------------------------
@@ -257,14 +263,16 @@ class Poker32:
     def set_button(self, button: int):
         self.button = button % 2
 
-    def reset(self, button: int | None = None, holes: Optional[Tuple[int, int]] = None):
+    def reset(self,
+              button: int | None = None,
+              hole_cards: Optional[Tuple[str, str]] = None):
         """
         button=0 -> Player 0 is SB (acts first), Player 1 is BB.
         button=1 -> Player 1 is SB, Player 0 is BB.
         """
         self._move_button(button)
         self._init_deck()
-        self._init_hole_cards(holes)
+        self._init_hole_cards(hole_cards)
         self._init_branch()
 
     def get_rgn_state(self):
@@ -298,13 +306,20 @@ class Poker32:
         """Return list of hole cards ordered relative to the button."""
         return {role: self._get_hole_card_from_role(role) for role in POSITIONS}
 
-    def get_rewards(self) -> Dict[str, int]:
+    def get_positional_rewards(self) -> Dict[str, int]:
         """Return rewards of absolute positions."""
         return rewards(self._get_game_branch(), self._get_hole_cards_dict())
 
+    def get_rewards(self) -> Tuple[int, ...] | None:
+        """Tuple of rewards for each player_id."""
+        p_rewards = self.get_positional_rewards()
+        if p_rewards is None:
+            return None
+        else:
+            return tuple(p_rewards[self.get_player_position(player_id)] for player_id in range(2))
+
     def get_player_reward(self, player_id: int) -> int:
-        position = self.get_player_position(player_id)
-        return self.get_rewards()[position]
+        return self.get_rewards()[player_id]
 
     def _pre_game_procedures(self):
         """Let the agents know that the game has started"""
@@ -345,15 +360,18 @@ class Poker32:
     def _post_game_procedures(self):
         """Let the agents know about the result"""
         for player_id, player in enumerate(self._get_players()):
-            player.observe_terminal(self._get_leaf_info(player_id))
+            state = self.get_leaf_info(player_id)
+            player.observe_terminal(state)
 
-    def play(self, players: List | Tuple, do_reset=True):
+    def play(self,
+             players: List | Tuple,
+             button: int | None = None,
+             hole_cards: Optional[Tuple[str, str]] = None):
         """
         Play a hand of Poker32 (Fresh deck, button moved by one).
         Output game report.
         """
-        if do_reset:
-            self.reset()
+        self.reset(button, hole_cards)
         self._set_players(players)
         self._pre_game_procedures()
         self._main_game_loop()

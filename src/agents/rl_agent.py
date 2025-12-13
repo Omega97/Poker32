@@ -9,9 +9,28 @@ import random
 import math
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Tuple, Any
 from src.agent import Agent, InfosetKey
 from src.utils import round_floats, softmax, maturity
+
+
+_TEST_INFOSETS = {
+        ("2", "RRRR"): "c",
+        ("2", "RRD"): "c",
+        ("2", "RDR"): "c",
+        ("2", "RT"): "c",
+        ("2", "DD"): "c",
+        ("2", "DRR"): "c",
+        ("2", "TR"): "c",
+        ("2", "Q"): "c",
+        ("2", "cRRRR"): "c",
+        ("2", "cRRD"): "c",
+        ("2", "cRDR"): "c",
+        ("2", "cDRR"): "c",
+        ("2", "cDD"): "c",
+        ("2", "cTR"): "c",
+        ("2", "cQ"): "c",
+    }
 
 
 def _serialize_infoset_key(key: InfosetKey) -> str:
@@ -56,7 +75,7 @@ class AgentRL(Agent):
         self.name = name
         self.training = training
         self.action_counts: Dict[InfosetKey, Dict[str, int]] = {}
-        self.history: list[tuple[InfosetKey, str, int]] = []
+        self.history: list[tuple[InfosetKey, str]] = []
         self.update_momentum: Dict[InfosetKey, Dict[str, float]] = {}
 
         if policy_path:
@@ -76,12 +95,33 @@ class AgentRL(Agent):
     # ------------------------------------------------------------------ #
     # Policy
     # ------------------------------------------------------------------ #
-    def get_logits(self, infoset: InfosetKey) -> Dict:
+    def get_logits(self) -> Dict[Tuple[str, str], Dict[str, float]]:
+        """ Get the logits dict for a given infoset. """
+        return self.logits
+
+    def set_logits(self, infoset: InfosetKey, logits_dict: Dict[str, float]):
+        self.logits[infoset] = logits_dict
+
+    def get_accumulated_reward(self) -> Dict[Tuple[str, str], Dict[str, float]]:
+        return self.accumulated
+
+    def set_accumulated_reward(self, infoset: InfosetKey, action: str, value: float):
+        self.accumulated[infoset][action] = value
+
+    def add_accumulated_reward(self, infoset: InfosetKey, action: str, value: float):
+        """Add 'value' to accumulated rewords-"""
+        r0 = self.get_accumulated_reward()[infoset].get(action, 0)
+        self.set_accumulated_reward(infoset, action, value=r0 + value)
+
+    def add_action_counts(self, infoset: InfosetKey, action: str, n=1):
         """
-        Get the logits dict for a given infoset.
-        Creates and stores a new dict if not present.
+        Add +1 to action_counts.
+        Create dict of actions, counts if necessary.
         """
-        return self.logits.setdefault(infoset, {})
+        if infoset not in self.action_counts:
+            self.action_counts[infoset] = {}
+        c0 = self.action_counts[infoset].get(action, 0)
+        self.action_counts[infoset][action] = c0 + n
 
     def get_policy(self,
                    infoset: InfosetKey,
@@ -103,15 +143,15 @@ class AgentRL(Agent):
         dict[str, float]
             Probability distribution over legal actions (sums to 1).
         """
-        logits = self.get_logits(infoset)
-        action_logits = [logits.get(a, 0.) for a in legal_moves]
+        spot_logits = self.get_logits().get(infoset, dict())
+        action_logits = [spot_logits.get(a, 0.) for a in legal_moves]
         return softmax(legal_moves, action_logits)
 
     def _get_all_actions(self, infoset: InfosetKey) -> set[str]:
         """Return all actions ever seen at this infoset from all containers."""
         return (
-                set(self.get_logits(infoset).keys()) |
-                set(self.accumulated.get(infoset, {}).keys()) |
+                set(self.get_logits().get(infoset, dict()).keys()) |
+                set(self.get_accumulated_reward().get(infoset, {}).keys()) |
                 set(self.update_momentum.get(infoset, {}).keys())
         )
 
@@ -119,23 +159,28 @@ class AgentRL(Agent):
         """
         Measures how well a policy converged based on obvious mistakes.
         """
-        if not self.logits:
+        if not self.get_logits():
             return 0.
 
         logits = []
-        for (hand_char, history), strategy_dict in self.logits.items():
+        for (hand_char, history), strategy_dict in self.get_logits().items():
             if hand_char == "2":
                 if "c" in strategy_dict and "f" in strategy_dict and "R" not in strategy_dict:
                     logits.append(-strategy_dict["c"])  # <- we want it to be negative
             elif hand_char == "A":
                 if "f" in strategy_dict:
                     logits.append(-strategy_dict["f"])  # <- we want it to be negative
+                if "c" in strategy_dict and "R" in strategy_dict:
+                    logits.append(-strategy_dict["c"])  # <- we want it to be negative
 
         return maturity(logits)
 
-    def _append_to_history(self, infoset: InfosetKey, action: str, player_id: int):
+    def append_to_history(self, infoset: InfosetKey, action: str):
         """Append state info to history."""
-        self.history.append((infoset, action, player_id))
+        self.history.append((infoset, action))
+
+    def clear_history(self):
+        self.history.clear()
 
     # ------------------------------------------------------------------ #
     # Action Selection
@@ -147,7 +192,6 @@ class AgentRL(Agent):
         """
         infoset = self._get_infoset_key(state)
         legal = state["legal_moves"]
-        player_id = state["player_id"]
         policy = self.get_policy(infoset, legal)
 
         # Sample action
@@ -156,7 +200,8 @@ class AgentRL(Agent):
         action = self.rng.choices(actions, weights=probs, k=1)[0]
 
         # Record for later update
-        self._append_to_history(infoset, action, player_id)
+        if self.training:
+            self.append_to_history(infoset, action)
 
         return action
 
@@ -168,32 +213,29 @@ class AgentRL(Agent):
         Scan the history, and apply the reward of this state to
         the accumulated rewards of the trajectory, then clear the history.
         """
-        for i, (infoset, action, player_id) in enumerate(self.history):
+        for infoset, action in self.history:
+
             # Accumulate update: only the taken action gets updated
             if infoset not in self.accumulated:
                 self.accumulated[infoset] = {}
 
-            position = state["positions"][player_id]
-            reward = state["rewards"][position]
-            r0 = self.accumulated[infoset].get(action, 0)
-            self.accumulated[infoset][action] = r0 + reward
+            # Get reward from state; the reward for the player that performed the action
+            hole_card, strand = infoset
+            position_ids = state["position_ids"]  # Dict[str, int]
+            rewards = state["rewards"]  # Tuple[int, ...]
+            position = ("SB", "BB")[len(strand) % 2]
+            id_player_performed_action = position_ids[position]
+            reward = rewards[id_player_performed_action]
 
-            if infoset not in self.action_counts:
-                self.action_counts[infoset] = {}
-            c0 = self.action_counts[infoset].get(action, 0)
-            self.action_counts[infoset][action] = c0 + 1
+            # Update rewards and visit counts
+            self.add_accumulated_reward(infoset, action, value=reward)
+            self.add_action_counts(infoset, action)
+
+            if self.verbose:
+                print(f'> accumulating: {position} {reward}')
 
         # Clear the history
-        self.history.clear()
-
-    def _on_game_end(self):
-        """Called after every finished hand."""
-        self.games_played += 1
-        self.cycle_games += 1
-
-    def _on_cycle_end(self):
-        """Called after the accumulated updates have been applied."""
-        self.cycle_games = 0
+        self.clear_history()
 
     # ------------------------------------------------------------------ #
     # After-game procedures
@@ -224,19 +266,37 @@ class AgentRL(Agent):
               - 'names': list of player names,
               - 'hole_cards': for example: ['A', 'T']
               - 'branch': for example: 'Qf'
-              - 'rewards': dict of str, int; for example: {'SB': 2, 'BB': -2}
+              - 'rewards': tuple of int, one for each player_id; for example: (2, -2)
         """
+        if self.verbose:
+            print(f"> observing: {state}")
+            print(f"> branch: {state['branch']}")
+            print(f"> history: {self.history}")
+
         if not self.training or not self.history:
             return
 
         # Apply rewards from self.history to self.accumulated
         self._accumulate_from_history(state)
 
-        # Apply updates at the end of the cycle
+        # Book-keeping
         self._on_game_end()
-        if self.cycle_games >= self.config["batch_size"]:
-            self._apply_accumulated_updates()
-            self._on_cycle_end()
+
+    def _on_game_end(self):
+        """Update game counts."""
+        self.games_played += 1
+        self.cycle_games += 1
+
+    def _on_cycle_end(self):
+        self.cycle_games = 0
+
+    def update_parameters(self):
+        """
+        After a batch of games is completed (end of cycle), update the
+        parameters of the model.
+        """
+        self._apply_accumulated_updates()
+        self._on_cycle_end()
 
     def _compute_average_rewards(self, infoset: InfosetKey) -> Dict[str, float]:
         """Return {action: average_reward} for actions seen this cycle."""
@@ -280,14 +340,15 @@ class AgentRL(Agent):
         mom = self.config.get("momentum", 0.9)
         logit_range = self.config.get("logit_range", 10.0)
         init_range = self.config.get("init_range", 0.1)
+        damping = self.config.get("damping", 0.99)
 
-        logits = self.logits.setdefault(infoset, {})
+        spot_logits = self.logits.setdefault(infoset, {})
         velocity = self.update_momentum.setdefault(infoset, {})
 
         for action, ng in zip(actions, normalized_grad):
             # Lazy random init on first update
-            if action not in logits:
-                logits[action] = self.rng.uniform(- init_range, + init_range)
+            if action not in spot_logits:
+                spot_logits[action] = self.rng.uniform(-init_range, +0)
 
             # Momentum update
             v_old = velocity.get(action, 0.0)
@@ -295,18 +356,17 @@ class AgentRL(Agent):
             velocity[action] = v_new
 
             # Apply to logit
-            logits[action] += v_new
+            spot_logits[action] += v_new
 
         # Cap the logits between '-logit_range' and +'logit_range'.
-        if logits:
-            for a in logits:
+        if spot_logits:
+            for a in spot_logits:
                 # Damping effect
-                damping = self.config.get("damping", 0.99)
-                logits[a] *= damping
+                spot_logits[a] *= damping
 
                 # Clipping
-                logits[a] = min(logits[a], logit_range)
-                logits[a] = max(logits[a], -logit_range)
+                spot_logits[a] = min(spot_logits[a], +logit_range)
+                spot_logits[a] = max(spot_logits[a], -logit_range)
 
     def _clear_accumulated_and_counts(self):
         """
@@ -323,9 +383,16 @@ class AgentRL(Agent):
             self.action_counts = {infoset: {k: v * gamma for k, v in d.items()}
                                   for infoset, d in self.action_counts.items()}
 
+    def _sanity_check(self):
+        for infoset, action in _TEST_INFOSETS.items():
+            value: int | None = self.get_logits().get(infoset, dict()).get(action, None)
+            if value is not None:
+                assert value <= 0, f'{action}|{infoset} -> {value:.4f} > 0 '
+
     def _apply_accumulated_updates(self):
         """
         Update logits based on the average accumulated update.
+        Used in 'self.update_parameters'.
         """
         # Sort for repeatability
         infosets = sorted(list(self.accumulated.keys()))
@@ -351,6 +418,22 @@ class AgentRL(Agent):
             # Step 4: Apply momentum + update logits + max-norm + clip
             self._apply_momentum_and_update(infoset, actions, normalized_grad)
 
+        try:
+            self._sanity_check()
+        except AssertionError:
+            print()
+            for infoset in infosets:
+                if infoset == ("2", "DD"):
+                    print()
+                    print(infoset)
+                    avg_rewards = self._compute_average_rewards(infoset)
+                    print(avg_rewards)
+                    actions = sorted(self._get_all_actions(infoset))
+                    print(actions)
+                    grad_vec = [avg_rewards.get(a, 0.0) for a in actions]
+                    print(grad_vec)
+            input()
+
         # Clean up
         self._clear_accumulated_and_counts()
 
@@ -363,7 +446,7 @@ class AgentRL(Agent):
 
         # Convert tuple keys to strings
         serializable_logits = {
-            _serialize_infoset_key(k): round_floats(v, decimals) for k, v in self.logits.items()
+            _serialize_infoset_key(k): round_floats(v, decimals) for k, v in self.get_logits().items()
         }
 
         data = {
@@ -425,12 +508,15 @@ def load_rl_agent(
         filepath: Path | str,
         *,
         rng: random.Random | None = None,
+        name: str = None,
         verbose: bool = False,
         training: bool = False,
 ) -> AgentRL:
     """ Load RL agent."""
     if rng is None:
         rng = random.Random()
+    if name is None:
+        name = filepath.stem
 
     # Load the data from file
     filepath = Path(filepath)
@@ -445,14 +531,13 @@ def load_rl_agent(
     games_played = data.get("games_played", 0)
 
     # Create agent instance
-    agent = AgentRL(rng=rng, verbose=False, training=training, name=filepath.stem)
+    agent = AgentRL(rng=rng, verbose=verbose, training=training, name=name)
     agent.logits = logits
     agent.games_played = games_played
 
-    if verbose:
-        if games_played < 10 ** 6:
-            print(f"  Loaded {filepath.name:30} → {games_played / 10 ** 3:.0f}K games")
-        else:
-            print(f"  Loaded {filepath.name:30} → {games_played / 10 ** 6:.1f}M games")
+    if games_played < 10 ** 6:
+        print(f"  Loaded {filepath.name:30} → {games_played / 10 ** 3:.0f}K games")
+    else:
+        print(f"  Loaded {filepath.name:30} → {games_played / 10 ** 6:.1f}M games")
 
     return agent

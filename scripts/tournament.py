@@ -16,16 +16,14 @@ def play_match(agent_a, agent_b, n_hands: int, rng:random.Random | None = None):
 
     game = Poker32(rng=rng)
 
+    #todo check
     total_a = total_b = 0.0
     for _ in range(n_hands):
         result = game.play((agent_a, agent_b))
 
         rewards = result["rewards"]
-        positions = result["positions"]
-
-        sorted_rewards = [rewards[positions[i]] for i in range(2)]
-        total_a += sorted_rewards[0]
-        total_b += sorted_rewards[1]
+        total_a += rewards[0]
+        total_b += rewards[1]
 
     return total_a / n_hands, total_b / n_hands
 
@@ -51,7 +49,7 @@ def run_tournament(
         return
 
     print(f"Loading {len(model_files)} agents...")
-    agents = [load_rl_agent(p, rng=rng, verbose=True, training=False) for p in model_files]
+    agents = [load_rl_agent(p, rng=rng, verbose=False, training=False) for p in model_files]
     names = [p.stem for p in model_files]
 
     n = len(agents)
@@ -97,7 +95,10 @@ def run_tournament(
         for j in range(n):
             val = results_matrix[i, j]
             color = "white" if abs(val) > 1.0 else "black"
-            plt.text(j, i, f"{val:+.2f}", ha="center", va="center", color=color, fontsize=9, fontweight="bold")
+            plt.text(j, i, f"{val:+.2f}",
+                     ha="center", va="center",
+                     color=color, fontsize=9,
+                     fontweight="bold")
 
     plt.xlabel("Opponent (column)")
     plt.ylabel("Player (row)")
