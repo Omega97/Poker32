@@ -65,7 +65,7 @@ def inspect_policy(file_path: str | Path, show_proba: bool = True):
             # max_l = max(logits_list)
             for act, l in zip(actions_list, logits_list):
                 # normalized = l - max_l
-                print(f"{act}:{l:5.1f}", end="  ")
+                print(f"{act}:{l:5.2f}", end="  ")
 
         print()  # newline
 
@@ -98,13 +98,11 @@ def relu(x):
     return max(0., x)
 
 
-def maturity(logits):
-    """Value in [0, 1], indicates how saturated are the smallest numbers in the list."""
+def maturity(logits, k=3.):
+    """Value in [0, 1], indicates how saturated are the numbers in the list."""
     if len(logits):
-        n_worst = len(logits) // 2
-        logits = sorted(logits)[:n_worst]
-        x = sum(logits) / len(logits)
-        return math.tanh(max(0., x))
+        logits = [relu(math.tanh(x/k)) for x in logits]
+        return sum(logits) / len(logits)
     else:
         return 0.
 
