@@ -107,11 +107,7 @@ def is_game_over(leaf):
 def rewards(leaf: str, hole_cards: dict) -> Dict[str, int] | None:
     """
     Compute the monetary outcome for the two players.
-
-    Returns
-    -------
-    (r0, r1) : dict
-        r0 is the amount that the SB wins/loses; r1 is the same for the BB.
+    Returns the amount that the SB and BB won or lost.
     """
     if not is_game_over(leaf):
         return None
@@ -300,7 +296,7 @@ class Poker32:
 
     def _get_hole_cards_dict(self):
         """Return list of hole cards ordered relative to the button."""
-        return {role:self._get_hole_card_from_role(role) for role in POSITIONS}
+        return {role: self._get_hole_card_from_role(role) for role in POSITIONS}
 
     def get_rewards(self) -> Dict[str, int]:
         """Return rewards of absolute positions."""
@@ -312,8 +308,9 @@ class Poker32:
 
     def _pre_game_procedures(self):
         """Let the agents know that the game has started"""
-        for i, player in enumerate(self._get_players()):
-            root_info = {'position': self.get_player_position(i)}
+        for player_id, player in enumerate(self._get_players()):
+            root_info = {'position': self.get_player_position(player_id),
+                         'hole_card': self.hole_cards[player_id]}
             player.observe_root(root_info)
 
     def _main_game_loop(self):
@@ -350,12 +347,13 @@ class Poker32:
         for player_id, player in enumerate(self._get_players()):
             player.observe_terminal(self._get_leaf_info(player_id))
 
-    def play(self, players: List | Tuple):
+    def play(self, players: List | Tuple, do_reset=True):
         """
         Play a hand of Poker32 (Fresh deck, button moved by one).
         Output game report.
         """
-        self.reset()
+        if do_reset:
+            self.reset()
         self._set_players(players)
         self._pre_game_procedures()
         self._main_game_loop()
