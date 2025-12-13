@@ -1,6 +1,5 @@
 # tests/test_poker32.py
 import random
-
 import src.poker32 as poker
 
 
@@ -61,9 +60,11 @@ def test_game_tree():
 def test_game():
     """Ensure the game object starts in the expected state."""
     game = poker.Poker32()
-    state = game._get_subjective_state(0)
+    # state = game._get_subjective_state(0)
     # print(state)
     # print(game.get_legal_moves())
+    print(game.get_positions())
+
     game.make_move('f')
     assert game._get_subjective_state(0)['branch'] == 'f'
     assert game.is_game_over() is True
