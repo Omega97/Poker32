@@ -30,7 +30,7 @@ def test_game_initialisation():
 
     assert game.button == 0
     assert game.hole_cards == ["Q", "2"]
-    game._init_hole_cards(holes=["Q", "Q"])
+    game._init_hole_cards(hole_cards=["Q", "Q"])
     assert game.hole_cards == ["Q", "Q"]
 
     print('test_game_initialisation passed!')
@@ -68,7 +68,7 @@ def test_game():
     game.make_move('f')
     assert game._get_subjective_state(0)['branch'] == 'f'
     assert game.is_game_over() is True
-    assert game.get_rewards() == {"SB": -1, "BB": 1}
+    assert game.get_positional_rewards() == {"SB": -1, "BB": 1}
 
     print('test_game_initialisation passed!')
 
