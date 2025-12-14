@@ -76,7 +76,7 @@ class Agent:
         if self.verbose:
             branch = new_state["branch"]
             player_name = move_info["player_name"]
-            print(f'> "{self.name}": "{player_name}" played {ACTIONS[move]}  -> "{branch}"')
+            print(f'> "{self.name}": "{player_name}" played \033[33m{ACTIONS[move]}\033[0m  -> "{branch}"')
 
 
 class RandomAgent(Agent):
@@ -125,7 +125,7 @@ class HumanAgent(Agent):
         branch = state["branch"] or "root"
         legal_moves = state["legal_moves"]   # e.g. ('f','c','R','D', …)
 
-        print(f"> Your hole card: {hole}🀄️")
+        print(f"> Your hole card: >>> {hole}🀄️ <<<")
         print(f'> Branch: "{branch}"')
 
         while True:
