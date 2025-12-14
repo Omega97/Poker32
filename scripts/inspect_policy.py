@@ -11,4 +11,5 @@ if __name__ == '__main__':
     # _POLICY_PATH = Path(f"..\\models\\tournament_2025\\{_MODEL_NAME}.json")
 
     # --------------- INSPECT THE RESULTS ---------------
+    # inspect_policy(file_path=_POLICY_PATH, show_proba=True)
     inspect_policy(file_path=_POLICY_PATH, show_proba=False)

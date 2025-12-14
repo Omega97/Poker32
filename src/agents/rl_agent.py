@@ -9,9 +9,9 @@ import random
 import math
 import json
 from pathlib import Path
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, List, Any
 from src.agent import Agent, InfosetKey
-from src.utils import round_floats, softmax, maturity
+from src.utils import round_floats, softmax, maturity, weighted_avg, normalize
 
 
 _TEST_INFOSETS = {
@@ -154,6 +154,12 @@ class AgentRL(Agent):
                 set(self.get_accumulated_reward().get(infoset, {}).keys()) |
                 set(self.update_momentum.get(infoset, {}).keys())
         )
+
+    def get_action_counts(self, infoset: InfosetKey, action: str) -> int:
+        """Get number of action counts in that spot for that action."""
+        counts = self.action_counts.get(infoset, {})
+        n = counts.get(action, 0)
+        return n
 
     def get_maturity(self) -> float:
         """
@@ -314,19 +320,21 @@ class AgentRL(Agent):
         return avg if total_samples > 0 else {}
 
     def _normalize_and_scale(self, grad_vec: list[float],
-                             n_actions: int,
-                             epsilon=1e-12) -> list[float]:
+                             action_counts: List[int]
+                             ) -> list[float]:
         """L2 normalize so ||grad|| = lr * sqrt(n_actions)."""
-        # center
-        baseline = sum(grad_vec) / len(grad_vec)
-        v = [g - baseline for g in grad_vec]
+        n_actions = len(action_counts)
 
-        # normalize and scale
-        norm = math.hypot(*v)
-        if norm < epsilon:
-            return [0.0] * len(v)
-        desired = self.config["learning_rate"] * math.sqrt(n_actions)
-        return [g * (desired / norm) for g in v]
+        # center
+        baseline = weighted_avg(grad_vec, action_counts)
+        v = [grad_vec[i] - baseline if action_counts[i] else 0. for i in range(n_actions)]
+
+        # scale
+        length = self.config["learning_rate"] * math.sqrt(n_actions)
+        v = normalize(v, length)
+
+        return v
+
 
     def _apply_momentum_and_update(
             self,
@@ -360,13 +368,15 @@ class AgentRL(Agent):
 
         # Cap the logits between '-logit_range' and +'logit_range'.
         if spot_logits:
-            for a in spot_logits:
-                # Damping effect
-                spot_logits[a] *= damping
+            for i, a in enumerate(spot_logits):
+                # Only apply on modified logits
+                if normalized_grad[i] != 0.:
+                    # Damping effect
+                    spot_logits[a] *= damping
 
-                # Clipping
-                spot_logits[a] = min(spot_logits[a], +logit_range)
-                spot_logits[a] = max(spot_logits[a], -logit_range)
+                    # Clipping
+                    spot_logits[a] = min(spot_logits[a], +logit_range)
+                    spot_logits[a] = max(spot_logits[a], -logit_range)
 
     def _clear_accumulated_and_counts(self):
         """
@@ -385,9 +395,9 @@ class AgentRL(Agent):
 
     def _sanity_check(self):
         for infoset, action in _TEST_INFOSETS.items():
-            value: int | None = self.get_logits().get(infoset, dict()).get(action, None)
+            value = self.get_logits().get(infoset, dict()).get(action, None)
             if value is not None:
-                assert value <= 0, f'{action}|{infoset} -> {value:.4f} > 0 '
+                assert value <= 0, f'{action}|{infoset} -> {value:.4f} > 0\n'
 
     def _apply_accumulated_updates(self):
         """
@@ -409,30 +419,17 @@ class AgentRL(Agent):
             # Step 2: Get full action list and build gradient vector
             actions = sorted(self._get_all_actions(infoset))
             grad_vec = [avg_rewards.get(a, 0.0) for a in actions]
+            action_counts = [self.get_action_counts(infoset, a) for a in actions]
 
             # Step 3: L2 normalize + scale by learning rate
-            normalized_grad = self._normalize_and_scale(grad_vec, len(actions))
+            normalized_grad = self._normalize_and_scale(grad_vec, action_counts)
             if not any(normalized_grad):
                 continue
 
             # Step 4: Apply momentum + update logits + max-norm + clip
             self._apply_momentum_and_update(infoset, actions, normalized_grad)
 
-        try:
-            self._sanity_check()
-        except AssertionError:
-            print()
-            for infoset in infosets:
-                if infoset == ("2", "DD"):
-                    print()
-                    print(infoset)
-                    avg_rewards = self._compute_average_rewards(infoset)
-                    print(avg_rewards)
-                    actions = sorted(self._get_all_actions(infoset))
-                    print(actions)
-                    grad_vec = [avg_rewards.get(a, 0.0) for a in actions]
-                    print(grad_vec)
-            input()
+        self._sanity_check()
 
         # Clean up
         self._clear_accumulated_and_counts()
@@ -502,6 +499,16 @@ class AgentRL(Agent):
         print(f"  • Training mode: {agent.training}")
 
         return agent
+
+    @staticmethod
+    def _advantage_vector(rewards: list[float]) -> list[float]:
+        """
+        Return n-length vector whose largest entry is +(n-1) and all others -1.
+        Sum is zero ⇒ no bias, variance is minimised for uniform policy.
+        """
+        n = len(rewards)
+        best_idx = max(range(n), key=rewards.__getitem__)
+        return [n - 1 if i == best_idx else -1 for i in range(n)]
 
 
 def load_rl_agent(

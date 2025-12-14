@@ -1,7 +1,7 @@
 import json
 import math
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Sequence
 from src.poker32 import GAME_MOVES, RANKS
 
 
@@ -112,3 +112,26 @@ def safety_check(policy_path: Path, model_name: str):
         input(f"{policy_path.name} already exists – proceed anyway?")
     else:
         print(f'Training "{model_name}" ({policy_path})')
+
+
+def weighted_avg(values: Sequence[float], weights: Sequence[float]) -> float:
+    """
+    Stable weighted mean; returns 0 if total weight is 0.
+    No NumPy, no math import, O(n) time, O(1) memory.
+    """
+    tot_weight = 0.0
+    weighted_sum = 0.0
+
+    for v, w in zip(values, weights):
+        tot_weight += w
+        weighted_sum += v * w
+
+    return weighted_sum / tot_weight if tot_weight else 0.0
+
+
+def normalize(v, length: float, epsilon=1e-9):
+    """Normalize array."""
+    norm = math.hypot(*v)
+    if norm < epsilon:
+        return [0.0] * len(v)
+    return [g * length / norm for g in v]
