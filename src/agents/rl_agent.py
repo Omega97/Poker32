@@ -113,7 +113,7 @@ class AgentRL(Agent):
         r0 = self.get_accumulated_reward()[infoset].get(action, 0)
         self.set_accumulated_reward(infoset, action, value=r0 + value)
 
-    def add_action_counts(self, infoset: InfosetKey, action: str, n=1):
+    def add_action_count(self, infoset: InfosetKey, action: str, n=1):
         """
         Add +1 to action_counts.
         Create dict of actions, counts if necessary.
@@ -214,7 +214,7 @@ class AgentRL(Agent):
     # ------------------------------------------------------------------ #
     # Learning
     # ------------------------------------------------------------------ #
-    def _accumulate_from_history(self, state):
+    def _accumulate_from_history(self, state: dict):
         """
         Scan the history, and apply the reward of this state to
         the accumulated rewards of the trajectory, then clear the history.
@@ -235,7 +235,7 @@ class AgentRL(Agent):
 
             # Update rewards and visit counts
             self.add_accumulated_reward(infoset, action, value=reward)
-            self.add_action_counts(infoset, action)
+            self.add_action_count(infoset, action)
 
             if self.verbose:
                 print(f'> accumulating: {position} {reward}')
@@ -335,7 +335,6 @@ class AgentRL(Agent):
 
         return v
 
-
     def _apply_momentum_and_update(
             self,
             infoset: InfosetKey,
@@ -346,7 +345,7 @@ class AgentRL(Agent):
         Final step: momentum, update logits, max-normalize, clip.
         """
         mom = self.config.get("momentum", 0.9)
-        logit_range = self.config.get("logit_range", 10.0)
+        logit_range = self.config.get("logit_range", 30.0)
         init_range = self.config.get("init_range", 0.1)
         damping = self.config.get("damping", 0.99)
 
@@ -375,8 +374,10 @@ class AgentRL(Agent):
                     spot_logits[a] *= damping
 
                     # Clipping
-                    spot_logits[a] = min(spot_logits[a], +logit_range)
-                    spot_logits[a] = max(spot_logits[a], -logit_range)
+                    # spot_logits[a] = min(spot_logits[a], +logit_range)
+                    # spot_logits[a] = max(spot_logits[a], -logit_range)
+                    if spot_logits[a] > logit_range or logit_range < -logit_range:
+                        raise ValueError("Logits hit the limits!")
 
     def _clear_accumulated_and_counts(self):
         """

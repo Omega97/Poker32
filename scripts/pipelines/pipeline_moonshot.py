@@ -14,7 +14,7 @@ if __name__ == '__main__':
     _RNG = random.Random(42)
     _CONFIG = {
         # --- CFR core -------------------------------------------------------
-        "batch_size": 5_000,  # hands between regret dumps (larger → less variance, slower convergence)
+        "batch_size": 10_000,  # hands between regret dumps (larger → less variance, slower convergence)
         "n_cycles": 100,
         "regret_floor": 0.0,  # CFR+: clip negative regrets → 0 (keep 0.0)
         "p_cap": 2e-4,  # Pluribus reach-probability cap (1e-4–5e-4 works)

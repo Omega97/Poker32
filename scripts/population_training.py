@@ -10,9 +10,10 @@ class PopulationTrainer:
         "learning_rate": 0.05,
         "temperature": 1.0,
         "momentum": 0.9,
-        "logit_range": 10.0,
-        "init_range": 0.2,
-        "batch_size": 10,
+        "logit_range": 30.0,
+        "damping": 0.99,
+        "init_range": 0.1,
+        "batch_size": 100,
         "n_cycles": 10,
     }
 
@@ -56,13 +57,13 @@ class PopulationTrainer:
                     path,
                     training=True,
                     config=self.config,
-                    rng=random.Random(self.rng.random()),
+                    rng=self.rng,
                 )
                 agent.name = name
                 print(f"  → Loaded {name} ({agent.games_played:,} games)")
             else:
                 agent = AgentRL(
-                    rng=random.Random(self.rng.random()),
+                    rng=self.rng,
                     config=self.config,
                     training=True,
                 )
@@ -98,17 +99,17 @@ class PopulationTrainer:
 
 if __name__ == "__main__":
     # ------------------ CONFIGURATION ------------------
-    _N_HANDS = 5_000_000
+    _N_HANDS = 1_000_000
     _N_AGENTS = 3
 
     _RNG = random.Random(0)
     _DIR_PATH = "../models/tournament_2025"
-    _CONFIG = {"learning_rate": 0.05,  # step length for each spot
+    _CONFIG = {"learning_rate": 0.1,  # step length for each spot
                "temperature": 1.0,  # modifier for the policy sampling
                "init_range": 0.1,  # initial range for the logits
-               "logit_range": 20,  # logits are capped between +/- this value
-               "momentum": 0.995,  # decay on accumulated rewards and counts
-               "damping": 0.995,  # attract the logits towards zero
+               "logit_range": 30,  # logits are capped between +/- this value
+               "momentum": 0.9,  # decay on accumulated rewards and counts
+               "damping": 0.99,  # attract the logits towards zero
                }
 
     # ---------------------------------------------------

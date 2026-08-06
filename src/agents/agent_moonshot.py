@@ -62,36 +62,23 @@ class AgentCRM(AgentRL):
     # ------------------------------------------------------------------ #
     # Learning
     # ------------------------------------------------------------------ #
-    def observe_terminal(self, state: dict):
-        """
-        Single outcome-sampling traversal on the finished hand.
-        We treat the *actual* sequence as the sampled outcome.
-        """
-        if not self.training:
+    def observe_terminal(self, state: dict) -> None:
+        if not self.training or not self.history:
             return
-
-        # 1. Reconstruct the trajectory for each player
-        #    history: list[(infoset, action, player_id)]
-        if not self.history:
-            return
-
-        # 2. Compute terminal utilities
-        seat = state["positions"][state["player_id"]]
-        utility = float(state["rewards"][seat])  # number of chips won by the player
-
-        # 3. Backward CFR pass
-        self._traverse_outcome_sampling(utility)
-
-        # 4. House-keeping
+        # derive utility once, then pass it down
+        player_id = state["player_id"]
+        utility = float(state["rewards"][player_id])
+        self._traverse_outcome_sampling(state, utility)
         self._on_game_end()
-        if self.cycle_games >= self.config["batch_size"]:
-            self._apply_accumulated_updates()
-            self._on_cycle_end()
+
+    def update_parameters(self):
+        self._apply_accumulated_updates()
+        self._on_cycle_end()
 
     # ------------------------------------------------------------------ #
     # Internal CFR
     # ------------------------------------------------------------------ #
-    def _traverse_outcome_sampling(self, utility: float):
+    def _traverse_outcome_sampling(self, state: dict, utility: float):
         """
         Single traversal of the *real* trajectory with outcome sampling weights.
         We walk backward through history and update regrets & strategy.
@@ -102,21 +89,27 @@ class AgentCRM(AgentRL):
         reach = {0: 1.0, 1: 1.0}  # we start at the root
 
         # walk backward
-        for infoset, action, player_id in reversed(self.history):
+        for infoset, action in reversed(self.history):
             legal = tuple(self._get_all_actions(infoset))  # all ever seen
             if not legal:
                 continue
+
+            position_ids = state["position_ids"]
+            hole_card, strand = infoset
+            position = ("SB", "BB")[len(strand) % 2]
+            id_player_performed_action = position_ids[position]
+
             policy = self.get_policy(infoset, legal)
             my_p = policy.get(action, 0.0)
             if my_p <= 0.0:
                 continue  # avoid div-by-zero
 
             # probability cap
-            if reach[player_id] < p_cap:
+            if reach[id_player_performed_action] < p_cap:
                 continue
 
             # counterfactual reach = product of opponent + chance probs
-            cf_reach = reach[0] * reach[1] / reach[player_id]
+            cf_reach = reach[0] * reach[1] / reach[id_player_performed_action]
 
             # regret
             value = sum(policy[a] * self._expected_value(infoset, a, utility) for a in legal)
@@ -125,11 +118,11 @@ class AgentCRM(AgentRL):
             # weighted regret
             w = cf_reach * regret
             self.batch_regret[infoset][action] += w
-            self.batch_strategy[infoset][action] += reach[player_id] * policy[action]
+            self.batch_strategy[infoset][action] += reach[id_player_performed_action] * policy[action]
             self.batch_counts[infoset] += 1
 
             # update reach for next (earlier) step
-            reach[player_id] *= my_p
+            reach[id_player_performed_action] *= my_p
 
         # clear after traversal
         self.history.clear()

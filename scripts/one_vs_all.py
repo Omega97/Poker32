@@ -80,7 +80,7 @@ class OneVsAllTrainer:
             opp = rng.choice(opponents)
 
             # Randomize seating
-            result = game.play((target, opp), verbose=False)
+            result = game.play((target, opp))
             reward = result["rewards"][1]
 
             total_reward += reward

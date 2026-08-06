@@ -76,7 +76,7 @@ class Agent:
         if self.verbose:
             branch = new_state["branch"]
             player_name = move_info["player_name"]
-            print(f'> "{self.name}": "{player_name}" played \033[33m{ACTIONS[move]}\033[0m  -> "{branch}"')
+            print(f'> "{self.name}": "{player_name}" played \033[36m{ACTIONS[move]}\033[0m  -> "{branch}"')
 
 
 class RandomAgent(Agent):
@@ -117,15 +117,14 @@ class HumanAgent(Agent):
                 print("You are the SB 🔹")
             else:
                 print("> You are the BB 🟦")
+            print(f"Your hole card: \033[1;92m >>> {state['hole_card']}🀄️<<<\033[0m")
             print()
             print(' ----- ACTION BEGINS -----')
 
     def choose_action(self, state: dict) -> str:
-        hole = state["hole"]
         branch = state["branch"] or "root"
         legal_moves = state["legal_moves"]   # e.g. ('f','c','R','D', …)
 
-        print(f"> Your hole card: >>> {hole}🀄️ <<<")
         print(f'> Branch: "{branch}"')
 
         while True:
@@ -164,11 +163,11 @@ class HumanAgent(Agent):
             print(state)
 
             if my_reward > 0:
-                print(f"🏆  You WON +{my_reward} 🟡")
+                print(f"\033[92m🏆  You WON +{my_reward} 🟡\033[0m")  # bright green
             elif my_reward < 0:
-                print(f"💸  You lost {abs(my_reward)} 🟡")
+                print(f"\033[91m💸  You lost {abs(my_reward)} 🟡\033[0m")  # bright red
             else:
-                print("⚖️  Split pot")
+                print("\033[93m⚖️  Split pot\033[0m")  # bright yellow
 
             hole_cards = state.get("hole_cards")
             if hole_cards:

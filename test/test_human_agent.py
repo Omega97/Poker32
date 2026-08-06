@@ -1,4 +1,5 @@
 import random
+import pathlib
 from src.poker32 import Poker32
 from src.agent import HumanAgent
 from src.agents.rl_agent import load_rl_agent
@@ -35,7 +36,7 @@ def main(agent_path, log_path, seed:int | None = 42):
 if __name__ == '__main__':
     # ------------------ CONFIGURATION ------------------
     _AGENT_NAME = "agentrl_v2"
-    _AGENT_PATH = f"..\\models\\{_AGENT_NAME}.json"
+    _AGENT_PATH = pathlib.Path(f"..\\models\\{_AGENT_NAME}.json")
     _LOG_PATH = "..\\data\\hero.json"
     _SEED = None
     # _SEED = 42
